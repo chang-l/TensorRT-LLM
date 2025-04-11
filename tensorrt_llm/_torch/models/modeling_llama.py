@@ -62,7 +62,11 @@ class LlamaAttention(Attention):
             is_nope_layer = config.no_rope_layers[layer_idx] == 0
 
         use_rope = not is_nope_layer
-        if use_rope and model_config.fuse_pos_embd:
+        attn_temperature_tuning = is_nope_layer and config.attn_temperature_tuning > 0
+        use_qk_norm = use_qk_norm and not is_nope_layer
+
+        if use_rope and not use_qk_norm and not attn_temperature_tuning and model_config.fuse_pos_embd:
+            # We can fuse pos embed only when: is_rope=True, is_qk_norm=False and fuse_pos_embd=True
             pos_embd_params = PositionalEmbeddingParams(
                 type=PositionEmbeddingType.rope_gptj
                 if use_gptj_style_rope else PositionEmbeddingType.rope_gpt_neox,
@@ -77,14 +81,14 @@ class LlamaAttention(Attention):
             num_key_value_heads=config.num_key_value_heads,
             max_position_embeddings=config.max_position_embeddings,
             bias=config.attention_bias,
-            rotary_emb=LlamaRotaryEmbedding(config),
+            rotary_emb=LlamaRotaryEmbedding(config) if use_rope else None,
             pos_embd_params=pos_embd_params,
             layer_idx=layer_idx,
             dtype=config.torch_dtype,
             config=model_config,
-            use_qk_norm=use_qk_norm and not is_nope_layer,
+            use_qk_norm=use_qk_norm,
             aux_stream=aux_stream,
-        )
+            attn_temperature_tuning=attn_temperature_tuning)
 
 
 class Llama4MoE(nn.Module):
@@ -300,7 +304,7 @@ class LlamaDecoderLayer(DecoderLayer):
 
         # Self Attention
         # For NOPE layers (like in Llama4), the position_ids needs to be set to None, so the rotary embedding will not be applied.
-        if self.is_nope_layer:
+        if self.is_nope_layer and not self.self_attn.attn_temperature_tuning:
             position_ids = None
 
         hidden_states = self.self_attn(
@@ -428,10 +432,15 @@ class Eagle3LlamaDecoderLayer(DecoderLayer):
             layer_idx=layer_idx,
         )
 
+        if config.model_type == "llama4_text":
+            inter_size = config.intermediate_size_mlp
+        else:
+            inter_size = config.intermediate_size
+
         self.mlp = GatedMLP(
             hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            bias=config.mlp_bias,
+            intermediate_size=inter_size,
+            bias=getattr(config, "mlp_bias", False),
             dtype=config.torch_dtype,
             config=model_config,
         )
