@@ -81,7 +81,7 @@ def parse_arguments():
 
 def setup_encoder(args):
     from tensorrt_llm._torch.mm_encoder import MultimodalEncoder
-    return MultimodalEncoder(model=args.model_dir)
+    return MultimodalEncoder(model=args.model_dir, max_batch_size=args.max_batch_size)
 
 def main():
     args = parse_arguments()
@@ -118,7 +118,8 @@ def main():
             sta = output.multimodal_params.item_offsets[i]
             end = sta + output.multimodal_params.item_token_length[i]
             mm_embedding = output.multimodal_params.embeddings[sta:end]
-            print(f"item {i} embedding: {mm_embedding.reshape(-1)[:10]}")
+            print(f"item {i} embedding (first 10): {mm_embedding.reshape(-1)[:1]}")
+
 
 
 

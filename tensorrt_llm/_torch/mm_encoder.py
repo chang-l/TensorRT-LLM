@@ -24,21 +24,26 @@ class MultimodalEncoder:
     def __init__(self,
                  model: Union[str, Path],
                  trust_remote_code: bool = False,
-                 tensor_parallel_size: int = 1,
+                 tensor_parallel_size: int = 1,  # TP should never be used for mm-encoder
+                 data_parallel_size: int = 1,  # placeholder for future use
                  dtype: str = "auto",
                  revision: Optional[str] = None,
                  **kwargs: Any) -> None:
 
         self._executor_cls = kwargs.pop("executor_cls", GenerationExecutor)
+
+        kwargs_dict = dict(kwargs)
+        kwargs_dict['backend'] = 'pytorch'
         try:
+            # Reuse the LLM arg parser for mm-encoder for now as some configs/args can be shared
+            # e.g., max_batch_size, parallel_config, mpi_session, etc.
             self.args = LlmArgs.from_kwargs(
-                backend="pytorch",
                 model=model,
                 trust_remote_code=trust_remote_code,
                 tensor_parallel_size=tensor_parallel_size,
                 dtype=dtype,
                 revision=revision,
-                **kwargs)
+                **kwargs_dict)
 
         except Exception as e:
             logger.error(
@@ -121,13 +126,10 @@ class MultimodalEncoder:
         self,
         mm_request: MultimodalRequest,
     ):
-
         result = self._executor.generate_multimodal_async(
             mm_request,
         )
         return result
-        #return RequestOutput._from_generation_result(result, prompt,
-        #                                             self.tokenizer)
 
 
     def _build_model(self):
@@ -155,7 +157,7 @@ class MultimodalEncoder:
         executor_config.hf_model_dir = self._hf_model_dir
         executor_config.trt_engine_dir = self._engine_dir
         executor_config.max_batch_size = max_batch_size
-        executor_config.max_num_active_requests = 100
+        executor_config.max_num_active_requests = 2048
 
 
         self._executor = self._executor_cls.create(

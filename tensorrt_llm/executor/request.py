@@ -378,14 +378,16 @@ class MultimodalResponse:
 
     def get_params(self):
         return MultimodalParams(
+            id=self.request_id,
             embeddings=self.embeddings,
             mrope_config=self.mrope_config,
             num_items=self.num_items,
             item_offsets=self.item_offsets,
             item_token_length=self.item_token_length)
 
-@dataclass
+@dataclass(slots=True)
 class MultimodalParams:
+    id: int
     embeddings: torch.Tensor = None
     mrope_config: Optional[dict] = None
     num_items: int = 0

@@ -58,7 +58,8 @@ class MMExecutor(PyExecutor):
         self.is_shutdown = False
         self.event_loop = self._executor_loop
         self.max_batch_size = max_batch_size
-
+        print(f"max_batch_size: {self.max_batch_size}")
+        print(f"max_num_active_requests: {self.max_num_active_requests}")
 
         # Start worker if needed
         self.worker_started = False
@@ -113,7 +114,7 @@ class MMExecutor(PyExecutor):
         """
         torch.cuda.set_device(self.device_id)
         got_finish_signal = False
-
+        iter_count = 0
         while not got_finish_signal or len(self.active_requests) > 0:
             # Get new requests
             new_requests = self._fetch_new_requests()
@@ -130,7 +131,7 @@ class MMExecutor(PyExecutor):
             assert batch_size > 0, (
                     "fail to schedule any pending request, "
                     "probably run out of resource.")
-
+            print(f"in executor loop, iter_count: {iter_count}, batch_size: {batch_size}, active_requests: {len(self.active_requests)}")
 
             self.num_scheduled_requests = batch_size
             logger.debug(
@@ -154,6 +155,7 @@ class MMExecutor(PyExecutor):
                 #self.resource_manager.update_resources(scheduled_batch)
 
             # TODO: add iter perf stats for multimodal executor
+            iter_count += 1
             # if self.enable_iter_perf_stats:
 
         # Cleanup when loop is done
@@ -359,12 +361,12 @@ class MultimodalModelEngine(PyTorchModelEngine):
             ready_item.length = self.model.image_size_to_num_tokens(image_size)
 
             # TODO: Below is not necessary; just for accuracy check (PIL/Tensor format leads to slight different values)
-            from torchvision.transforms import ToTensor
-            ready_item.data =  ToTensor()(ready_item.data)
+            #from torchvision.transforms import ToTensor
+            #ready_item.data =  ToTensor()(ready_item.data)
 
             # each item.data is a PIL image for image modality
             # Note: if convert to Tensor input (ToTensor()(ready_item.data)), results after preprocess will be slightly different
-            ready_item.data = self.model._preprocess([ready_item.data])[0] # converted to tensor
+            ready_item.data = self.model._preprocess([ready_item.data])[0] # _preprocess involves H2D transfer
             # Store processed item with its request and item IDs
             processed_items[(ready_item.req_id, ready_item.id)] = ready_item
 

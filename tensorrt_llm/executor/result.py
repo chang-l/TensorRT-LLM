@@ -418,6 +418,26 @@ class MultimodalResult:
         # should be called when new prompts are submitted
         self._done = False
 
+    @property
+    def finished(self) -> bool:
+        return self._done
+
+    async def _aresult_step(self):
+        assert self.aqueue is not None, "The asyncio event loop was not present during initialization, so async operations are not available."
+        response = await self.aqueue.get()
+        global_tracer().log_instant("result_step.get")
+        self._handle_response(response)
+
+    async def aresult(self) -> "GenerationResult":
+        """Wait for the completion of the request, and return the result.
+
+        Returns:
+            tensorrt_llm.executor.result.GenerationResult: generation result.
+        """
+        while not self._done:
+            await self._aresult_step()
+        return self
+
     def _result_step(self, timeout: Optional[float] = None):
         response = self.queue.get(timeout=timeout)
         self._handle_response(response)

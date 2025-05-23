@@ -18,7 +18,8 @@ from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_dict
 from tensorrt_llm.llmapi.reasoning_parser import ReasoningParserFactory
 from tensorrt_llm.logger import logger, severity_map
 from tensorrt_llm.serve import OpenAIDisaggServer, OpenAIServer
-
+from tensorrt_llm._torch.mm_encoder import MultimodalEncoder
+from tensorrt_llm.serve.encoder_server import OpenAIEncoderServer
 
 def get_llm_args(model: str,
                  tokenizer: Optional[str] = None,
@@ -96,6 +97,17 @@ def launch_server(host: str, port: int, llm_args: dict):
 
     asyncio.run(server(host, port))
 
+def launch_encoder_server(host: str, port: int, encoder_args: dict):
+    backend = encoder_args["backend"]
+    model = encoder_args["model"]
+    if backend == 'pytorch':
+        encoder = MultimodalEncoder(**encoder_args)
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")
+
+    server = OpenAIEncoderServer(encoder=encoder, model=model)
+
+    asyncio.run(server(host, port))
 
 @click.command("serve")
 @click.argument("model", type=str)
@@ -224,6 +236,72 @@ def serve(model: str, tokenizer: Optional[str], host: str, port: int,
     llm_args = update_llm_args_with_extra_dict(llm_args, llm_args_extra_dict)
 
     launch_server(host, port, llm_args)
+
+
+@click.command("encoder")
+@click.argument("model", type=str)
+@click.option("--host",
+              type=str,
+              default="localhost",
+              help="Hostname of the server.")
+@click.option("--port", type=int, default=8000, help="Port of the server.")
+@click.option("--backend",
+              type=click.Choice(["pytorch"]),
+              default=None,
+              help="Set to 'pytorch' for pytorch path. Default is cpp path.")
+@click.option('--log_level',
+              type=click.Choice(severity_map.keys()),
+              default='info',
+              help="The logging level.")
+@click.option("--max_batch_size",
+              type=int,
+              default=BuildConfig.max_batch_size,
+              help="Maximum number of requests that the engine can schedule.")
+@click.option("--gpus_per_node",
+              type=int,
+              default=None,
+              help="Number of GPUs per node. Default to None, and it will be "
+              "detected automatically.")
+@click.option("--trust_remote_code",
+              is_flag=True,
+              default=False,
+              help="Flag for HF transformers.")
+@click.option(
+    "--extra_encoder_options",
+    type=str,
+    default=None,
+    help=
+    "Path to a YAML file that overwrites the parameters specified by trtllm-serve."
+)
+def serve_encoder(model: str, host: str, port: int,
+          log_level: str, backend: str, max_batch_size: int,
+          gpus_per_node: Optional[int],
+          trust_remote_code: bool,
+          extra_encoder_options: Optional[str]):
+    """Running an OpenAI API compatible server
+
+    MODEL: model name | HF checkpoint path | TensorRT engine path
+    """
+    logger.set_level(log_level)
+
+    llm_args, _ = get_llm_args(
+        model=model,
+        backend=backend,
+        max_batch_size=max_batch_size,
+        gpus_per_node=gpus_per_node,
+        trust_remote_code=trust_remote_code)
+
+    encoder_args_extra_dict = {}
+    if extra_encoder_options is not None:
+        with open(extra_encoder_options, 'r') as f:
+            encoder_args_extra_dict = yaml.safe_load(f)
+    encoder_args = update_llm_args_with_extra_dict(llm_args, encoder_args_extra_dict)
+
+    # TODO: add DP for encoder
+    assert encoder_args["tensor_parallel_size"] == 1, "TP should be 1 for encoder"
+    assert encoder_args["pipeline_parallel_size"] == 1, "PP should be 1 for encoder"
+    assert encoder_args["moe_expert_parallel_size"] is None, "EP should be None for encoder"
+    launch_encoder_server(host, port, encoder_args)
 
 
 def get_ctx_gen_server_urls(
@@ -359,7 +437,8 @@ main = DefaultGroup(
     commands={
         "serve": serve,
         "disaggregated": disaggregated,
-        "disaggregated_mpi_worker": disaggregated_mpi_worker
+        "disaggregated_mpi_worker": disaggregated_mpi_worker,
+        "encoder": serve_encoder
     })
 
 if __name__ == "__main__":

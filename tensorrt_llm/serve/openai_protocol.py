@@ -72,6 +72,14 @@ class ErrorResponse(OpenAIBaseModel):
     param: Optional[str] = None
     code: int
 
+class MultimodalResponse(OpenAIBaseModel):
+    id: int
+    request_type: str
+    first_gen_tokens: Optional[List[int]] = None
+    ctx_request_id: Optional[int] = None
+    encoded_opaque_state: Optional[str] = None
+    draft_tokens: Optional[List[int]] = None
+
 
 class CompletionLogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
