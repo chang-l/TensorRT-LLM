@@ -384,6 +384,32 @@ class ExecutorBindingsProxy(GenerationExecutor):
         # Process the errors in-case error during shutting down the threads
         self._handle_background_error()
 
+    def submit_mm(self, request):
+        """Submit a multimodal request for processing.
+
+        Args:
+            request: The multimodal request containing items to process
+
+        Returns:
+            MultimodalResponse: The response object that will be populated with results
+        """
+        from tensorrt_llm.executor.result import MultimodalResult
+        self._start_dispatch_threads()
+        request.set_id(self._get_next_client_id())
+        result = MultimodalResult(
+            request,
+            background_error_handler=self._handle_background_error,
+            executor=self)
+        self._results[request.id] = result
+        self.request_queue.put(request)
+
+        error = self.request_error_queue.get()
+        if isinstance(error, Exception):
+            raise error
+
+        self._handle_background_error()
+        return result
+
     def submit(self, request: GenerationRequest) -> GenerationResult:
         """
             Low-level API to the executor. Return a "future" GenerationResult

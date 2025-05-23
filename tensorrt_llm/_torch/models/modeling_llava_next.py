@@ -22,7 +22,33 @@ from .modeling_auto import AutoModelForCausalLM
 from .modeling_clip import CLIPVisionModel
 from .modeling_multimodal_utils import fuse_input_embeds
 from .modeling_utils import ModelConfig, register_auto_model
+from transformers.models.llava_next.modeling_llava_next import (
+    get_anyres_image_grid_shape, unpad_image)
+from transformers import CLIPVisionConfig
 
+class CLIPEncoderInfo:
+
+    def __init__(self, hf_config):
+        self.vision_config = hf_config.vision_config
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        return self.get_patch_grid_length()**2 + 1
+
+    def get_image_size(self) -> int:
+        return self.vision_config.image_size
+
+    def get_patch_size(self) -> int:
+        return self.vision_config.patch_size
+
+    def get_patch_grid_length(self) -> int:
+        image_size, patch_size = self.get_image_size(), self.get_patch_size()
+        assert image_size % patch_size == 0
+        return image_size // patch_size
 
 class LlavaNextInputProcessor(InputProcessor):
 
@@ -66,6 +92,163 @@ class LlavaNextInputProcessor(InputProcessor):
 
         # Use HF multi-modal projector
         self.mm_projector = hf_mm_projector
+        self.hf_model_config = hf_model_config
+
+
+    def _get_num_unpadded_features(
+        self,
+        *,
+        original_height: int,
+        original_width: int,
+        npatches: int,
+        num_patch_height: int,
+        num_patch_width: int,
+    ) -> tuple[int, int]:
+        current_height = npatches * num_patch_height
+        current_width = npatches * num_patch_width
+
+        aspect_ratio = original_width / original_height
+        current_aspect_ratio = current_width / current_height
+
+        if aspect_ratio > current_aspect_ratio:
+            new_height = int(
+                round(original_height * (current_width / original_width), 7))
+            padding = (current_height - new_height) // 2
+            current_height = current_height - (2 * padding)
+        else:
+            new_width = int(
+                round(original_width * (current_height / original_height), 7))
+            padding = (current_width - new_width) // 2
+            current_width = current_width - (2 * padding)
+
+        unpadded_features = current_height * current_width
+        newline_features = current_height
+
+        return (unpadded_features, newline_features)
+
+    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        hf_config = self.hf_model_config
+        vision_encoder_info = CLIPEncoderInfo(hf_config)
+
+        base_feature_size = vision_encoder_info.get_num_image_tokens(
+            image_width=image_width,
+            image_height=image_height,
+        )
+        if hf_config.vision_feature_select_strategy == "default":
+            base_feature_size = base_feature_size - 1
+
+        num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+            image_size=(image_height, image_width),
+            grid_pinpoints=hf_config.image_grid_pinpoints,
+            patch_size=vision_encoder_info.get_image_size(),
+        )
+
+        (
+            unpadded_feature_size,
+            newline_feature_size,
+        ) = self._get_num_unpadded_features(
+            original_height=image_height,
+            original_width=image_width,
+            npatches=vision_encoder_info.get_patch_grid_length(),
+            num_patch_height=num_patch_height,
+            num_patch_width=num_patch_width,
+        )
+        return unpadded_feature_size + newline_feature_size + base_feature_size
+
+    def image_size_to_num_patches(self, image_size, grid_pinpoints = None, patch_size: int = None):
+        """
+        Calculate the number of patches after the preprocessing for images of any resolution.
+
+        Args:
+            image_size (`torch.LongTensor` or `np.ndarray` or `Tuple[int, int]`):
+                The size of the input image in the format (height, width). ?
+            grid_pinpoints (`List`):
+                A list containing possible resolutions. Each item in the list should be a tuple or list
+                of the form `(height, width)`.
+            patch_size (`int`):
+                The size of each image patch.
+
+        Returns:
+            int: the number of patches
+        """
+        def select_best_resolution(original_size: tuple, possible_resolutions: list) -> tuple:
+            """
+            Selects the best resolution from a list of possible resolutions based on the original size.
+
+            This is done by calculating the effective and wasted resolution for each possible resolution.
+
+            The best fit resolution is the one that maximizes the effective resolution and minimizes the wasted resolution.
+
+            Args:
+                original_size (tuple):
+                    The original size of the image in the format (height, width).
+                possible_resolutions (list):
+                    A list of possible resolutions in the format [(height1, width1), (height2, width2), ...].
+
+            Returns:
+                tuple: The best fit resolution in the format (height, width).
+            """
+            original_height, original_width = original_size
+            best_fit = None
+            max_effective_resolution = 0
+            min_wasted_resolution = float("inf")
+
+            for height, width in possible_resolutions:
+                scale = min(width / original_width, height / original_height)
+                downscaled_width, downscaled_height = int(original_width * scale), int(original_height * scale)
+                effective_resolution = min(downscaled_width * downscaled_height, original_width * original_height)
+                wasted_resolution = (width * height) - effective_resolution
+
+                if effective_resolution > max_effective_resolution or (
+                    effective_resolution == max_effective_resolution and wasted_resolution < min_wasted_resolution
+                ):
+                    max_effective_resolution = effective_resolution
+                    min_wasted_resolution = wasted_resolution
+                    best_fit = (height, width)
+
+            return best_fit
+
+        if grid_pinpoints is None:
+            grid_pinpoints = self.hf_model_config.image_grid_pinpoints
+        if patch_size is None:
+            patch_size = self.hf_model_config.vision_config.image_size
+
+        if not isinstance(grid_pinpoints, list):
+            raise TypeError("grid_pinpoints should be a list of tuples or lists")
+
+        # ! VERY IMPORTANT if image_size is tensor, must convert to into tuple, otherwise it will cause wrong calculate
+        if not isinstance(image_size, (list, tuple)):
+            if not isinstance(image_size, (torch.Tensor, np.ndarray)):
+                raise TypeError(f"image_size invalid type {type(image_size)} with value {image_size}")
+            image_size = image_size.tolist()
+
+        best_resolution = select_best_resolution(image_size, grid_pinpoints)
+        height, width = best_resolution
+        num_patches = 0
+        # consider change to ceil(height/patch_size)*ceil(width/patch_size) + 1
+        for i in range(0, height, patch_size):
+            for j in range(0, width, patch_size):
+                num_patches += 1
+        # add the base patch
+        num_patches += 1
+        return num_patches
+
+    def image_size_to_num_tokens(self, image_size):
+        num_patches = self.image_size_to_num_patches(image_size)
+        vision_encoder_info = CLIPEncoderInfo(self.hf_model_config)
+        base_feature_size = vision_encoder_info.get_num_image_tokens(
+            image_width=image_size[1],
+            image_height=image_size[0],
+        )
+        if self.hf_model_config.vision_feature_select_strategy == "default":
+            base_feature_size = base_feature_size - 1
+        return num_patches * base_feature_size
 
     @nvtx_range("[Vision] preprocess")
     def _preprocess(self, images):

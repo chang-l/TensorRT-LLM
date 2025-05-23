@@ -148,6 +148,14 @@ class GenerationExecutor(ABC):
                 disaggregated_params=disaggregated_params))
         return result
 
+    def generate_multimodal_async(
+            self,
+            mm_request,
+    ):
+        result = self.submit_mm(
+            mm_request)
+        return result
+
     def generate(
         self,
         prompt_token_ids: Union[List[int], List[List[int]]],

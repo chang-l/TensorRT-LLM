@@ -2,13 +2,20 @@ import copy
 import datetime
 import enum
 import json
+import logging
+import multiprocessing as mp
 import os
 import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import closing
+from itertools import chain
+from multiprocessing.synchronize import Event as EventType
 from pathlib import Path
-from queue import Queue
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from queue import Empty, Full, Queue
+from threading import Lock, Thread
+from typing import (Any, Callable, Dict, Iterable, List, Optional, Sequence,
+                    Set, Tuple, Type, Union)
 
 import torch
 
@@ -34,7 +41,7 @@ from .ipc import FusedIpcQueue, IpcQueue
 from .postproc_worker import (PostprocParams, PostprocWorker,
                               PostprocWorkerConfig, postproc_worker_main)
 from .request import (CancellingRequest, GenerationRequest, LoRARequest,
-                      PromptAdapterRequest)
+                      PromptAdapterRequest, MultimodalRequest, MultimodalResponse)
 from .result import (GenerationResult, IterationResult, LogProbsResult,
                      ResponseWrapper, compute_logprobs)
 from .utils import (PERIODICAL_RESP_IN_AWAIT, ErrorResponse, IntraProcessQueue,
@@ -81,6 +88,8 @@ class ExecutorBindingsWorker(GenerationExecutor):
         self._executor_config = executor_config
         self._is_pytorch_backend = getattr(self._executor_config, "backend",
                                            None) == "pytorch"
+        self._is_multimodal_backend = getattr(self._executor_config, "backend",
+                                           None) == "multimodal"
 
         if isinstance(engine, list):
             engine = engine[self.rank]
@@ -113,6 +122,11 @@ class ExecutorBindingsWorker(GenerationExecutor):
                     create_py_executor
                 create_executor = create_py_executor
                 args["lora_config"] = lora_config
+            elif executor_config.backend == "multimodal":
+                from tensorrt_llm._torch.pyexecutor.multimodal.multimodal_pyexecutor_creator import \
+                    create_multimodal_pyexecutor
+                args.pop("engine_dir")
+                create_executor = create_multimodal_pyexecutor
             elif executor_config.backend == "autodeploy":
                 from tensorrt_llm._torch.auto_deploy.shim.ad_executor import \
                     create_autodeploy_executor
@@ -448,6 +462,22 @@ class ExecutorBindingsWorker(GenerationExecutor):
         except Exception as e:
             raise RequestError(str(e)) from e
 
+    def _enqueue_mm_request(self, request: MultimodalRequest) -> int:
+        """Enqueue a multimodal request directly without converting to tllm.Request.
+
+        Args:
+            request: The multimodal request to enqueue
+
+        Returns:
+            int: The request ID assigned by the engine
+        """
+        assert request.id is not None
+
+        # For multimodal, we just need to pass the data directly
+        # No need for complex request type conversion
+        req_id = self.engine.enqueue_request(request)
+        return req_id
+
     def submit(self, request: GenerationRequest) -> GenerationResult:
         """ Low-level API to the executor. Return a "future" GenerationResult which can be waited. """
         self.start()
@@ -476,6 +506,31 @@ class ExecutorBindingsWorker(GenerationExecutor):
 
         request_id = self._enqueue_request(request)
         # request_id returned from backend is necessary for the abort_request method.
+        self._client_id_to_request_id[client_id] = request_id
+
+        self._handle_background_error()
+
+        return result
+
+    def submit_mm(self, request: MultimodalRequest):
+        from .result import MultimodalResult
+        """Submit a multimodal request and return a MultimodalResponse."""
+        self.start()
+
+        if self.rank != 0:
+            raise RuntimeError(
+                "Only rank 0 can submit requests.\n"
+                "To fix this, ensure that the llm.generate(...) method is "
+                "guarded with the `if __name__ == '__main__':` block.")
+
+        client_id = request.id if request.id is not None else self._get_next_client_id()
+        if request.id is None:
+            request.set_id(client_id)
+
+        result = MultimodalResult(request)
+        self._results[client_id] = result
+
+        request_id = self._enqueue_mm_request(request)
         self._client_id_to_request_id[client_id] = request_id
 
         self._handle_background_error()
@@ -711,6 +766,12 @@ def worker_main(
                             request_error_queue.put(None)  # None means success
                         except RequestError as e:
                             request_error_queue.put(e)
+                    elif isinstance(req, MultimodalRequest):
+                        try:
+                            worker.submit_mm(req)
+                            request_error_queue.put(None)  # None means success
+                        except RequestError as e:
+                            request_error_queue.put(e)
                     else:
                         raise ValueError(f"Unknown request type: {type(req)}")
 
@@ -802,7 +863,7 @@ class AwaitResponseHelper:
             queue = self.worker.return_queue(response.client_id)
 
             logprobs_result = _get_logprobs(self.worker, response,
-                                            self.worker._is_pytorch_backend)
+                                            self.worker._is_pytorch_backend or self.worker._is_multimodal_backend)
             if logprobs_result:
                 response = ResponseWrapper(response, logprobs_result)
 
@@ -871,7 +932,7 @@ class AwaitResponseHelper:
                                          response.request_id)
             else:
                 logprobs_result = _get_logprobs(self.worker, response,
-                                                self.worker._is_pytorch_backend)
+                                                self.worker._is_pytorch_backend or self.worker._is_multimodal_backend)
                 if logprobs_result:
                     response = ResponseWrapper(response, logprobs_result)
 
@@ -974,7 +1035,7 @@ def _send_rsp(
 
     # Eliminate the finished GenerationRequest instances timely, which may
     # take considerable memory.
-    if is_llm_response(response):
+    if is_llm_response(response) or isinstance(response, MultimodalResponse):
         if response.has_error() or response.result.is_final:
             worker._pop_result(response.client_id)
     elif isinstance(response, ErrorResponse):
