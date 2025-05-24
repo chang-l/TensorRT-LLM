@@ -10,6 +10,7 @@ from ..llmapi.llm_utils import KvCacheRetentionConfig
 from ..sampling_params import SamplingParams
 from .postproc_worker import PostprocParams
 import asyncio
+from multiprocessing.reduction import ForkingPickler
 from typing import cast
 __all__ = [
     "LoRARequest",
@@ -341,6 +342,7 @@ class MultimodalResponse:
     item_offsets: List[int] = field(default_factory=list)
     item_token_length: List[int] = field(default_factory=list)
     embeddings: torch.Tensor = None
+    embedding_handle: Optional[bytes] = None
     mrope_config: Optional[dict] = None
     _is_final: bool = False
     error_message: Optional[str] = None
@@ -377,6 +379,8 @@ class MultimodalResponse:
         })
 
     def get_params(self):
+        if self.embedding_handle:
+            self.embeddings = ForkingPickler.loads(self.embedding_handle)
         return MultimodalParams(
             id=self.request_id,
             embeddings=self.embeddings,

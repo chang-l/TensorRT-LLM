@@ -13,9 +13,9 @@ from ..model_engine import ModelEngine, PyTorchModelEngine
 from tensorrt_llm.inputs import create_input_processor
 import queue
 import threading
-from tensorrt_llm.executor.request import MultimodalRequest, MultimodalItem
+from tensorrt_llm.executor.request import MultimodalRequest, MultimodalItem, MultimodalResponse
 from ..llm_request import ExecutorResponse
-
+from multiprocessing.reduction import ForkingPickler
 logger = logging.getLogger(__name__)
 
 class MMExecutor(PyExecutor):
@@ -201,8 +201,10 @@ class MMExecutor(PyExecutor):
             with self.response_cv:
                 for req_id, resp in responses.items():
 
-                    if resp.cp_event is not None:
+                    if isinstance(resp, MultimodalResponse) and resp.cp_event is not None:
                         resp.cp_event.synchronize()
+                        resp.embedding_handle = bytes(ForkingPickler.dumps(resp.embeddings))
+                        resp.embeddings = None
                         resp.cp_event = None
 
                     if req_id in self.responses.keys():
@@ -249,7 +251,7 @@ class MMExecutor(PyExecutor):
                 cp_event = torch.cuda.Event()
                 cp_event.record()
 
-                # Attach the fused embedding directly to the response
+                # Attach the fused embedding directly to the response (un-ready due to non_blocking D2H transfer)
                 response.set_embeddings(request_embedding, cp_event)
 
                 # Attach mrope config if available

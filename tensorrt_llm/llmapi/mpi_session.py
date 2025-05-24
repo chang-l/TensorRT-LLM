@@ -17,6 +17,7 @@ from tensorrt_llm.logger import logger
 
 from .._utils import global_mpi_rank, mpi_barrier, mpi_rank
 from .utils import print_colored, print_colored_debug
+import multiprocessing as mp
 
 if ENABLE_MULTI_DEVICE:
     import mpi4py
@@ -133,6 +134,7 @@ class MpiPoolSession(MpiSession):
 
     def __init__(self, n_workers: int):
         self.n_workers = n_workers
+        self.parent_auth_key = mp.current_process().authkey
         self.mpi_pool: Optional[MPIPoolExecutor] = None
         self._start_mpi_pool()
         if ENABLE_MULTI_DEVICE:
@@ -163,11 +165,21 @@ class MpiPoolSession(MpiSession):
     def abort(self):
         self.get_comm().Abort(1)
 
+    @staticmethod
+    def worker_init(auth_key_hex):
+        # Get the auth key from environment
+        if auth_key_hex:
+            # Convert hex string back to bytes
+            auth_key = bytes.fromhex(auth_key_hex)
+            # Set it for the current process
+            mp.current_process().authkey = auth_key
+
     def _start_mpi_pool(self):
         assert not self.mpi_pool, 'MPI session already started'
-
         self.mpi_pool = MPIPoolExecutor(max_workers=self.n_workers,
-                                        path=sys.path)
+                                        path=sys.path,
+                                        initializer=MpiPoolSession.worker_init,
+                                        initargs=(self.parent_auth_key.hex(),))
 
     def __del__(self):
         self.shutdown_abort()
