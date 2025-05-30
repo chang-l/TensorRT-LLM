@@ -7,6 +7,7 @@ from quickstart_advanced import add_llm_args
 
 from tensorrt_llm.inputs import (INPUT_FORMATTER_MAP, default_image_loader,
                                  default_video_loader)
+import asyncio
 
 example_images = [
     "https://huggingface.co/datasets/YiYiXu/testing-images/resolve/main/seashore.png",
@@ -88,40 +89,40 @@ def main():
 
     encoder = setup_encoder(args)
     from tensorrt_llm.executor.request import MultimodalRequest, MultimodalItem
-    mm_request = MultimodalRequest(
-            items=[
-                MultimodalItem(
-                    req_id=1,
-                    id=0,
-                    modality_type="image",
-                    url=example_images[0]
-                ),
-                MultimodalItem(
-                    req_id=1,
-                    id=1,
-                    modality_type="image",
-                    url=example_images[1]
-                ),
-                MultimodalItem(
-                    req_id=1,
-                    id=2,
-                    modality_type="image",
-                    url=example_images[2]
-                )
-            ]
+    items = [
+        MultimodalItem(
+            req_id=1,
+            id=0,
+            modality_type="image",
+            url=example_images[0]
+        ),
+        MultimodalItem(
+            req_id=1,
+            id=1,
+            modality_type="image",
+            url=example_images[1]
+        ),
+        MultimodalItem(
+            req_id=1,
+            id=2,
+            modality_type="image",
+            url=example_images[2]
         )
+    ]
+    mm_request = MultimodalRequest(
+        items=items
+    )
 
     mm_requests = [mm_request] * 20
+
     outputs = encoder.generate_from_mm_request(mm_requests)
     for output in outputs:
+        #print(f"output: {output.multimodal_params.embeddings.device}")
         for i in range(output.multimodal_params.num_items):
             sta = output.multimodal_params.item_offsets[i]
             end = sta + output.multimodal_params.item_token_length[i]
             mm_embedding = output.multimodal_params.embeddings[sta:end]
-            print(f"item {i} embedding (first 10): {mm_embedding.reshape(-1)[:1]}")
-
-
-
+            print(f"item {i} embedding (first 10): {mm_embedding.reshape(-1)[:10]}")
 
 if __name__ == "__main__":
     main()

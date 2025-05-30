@@ -101,7 +101,7 @@ class OpenAIEncoderServer:
 
         try:
             mm_request = MultimodalRequest.from_chat_messages(request.messages)
-            promise = self.encoder.generate_async(mm_request)
+            promise = await self.encoder.generate_async(mm_request)
             asyncio.create_task(self.await_disconnected(raw_request, promise))
             response = await create_mm_embedding_response(promise)
             return response

@@ -11,7 +11,11 @@ from ..sampling_params import SamplingParams
 from .postproc_worker import PostprocParams
 import asyncio
 from multiprocessing.reduction import ForkingPickler
+from torch.multiprocessing.reductions import rebuild_cuda_tensor
 from typing import cast
+from tensorrt_llm.inputs.utils import load_image
+from .._utils import nvtx_range_debug
+
 __all__ = [
     "LoRARequest",
     "PromptAdapterRequest",
@@ -182,6 +186,7 @@ class MultimodalItem:
     url: str
     # The data of the item
     data: Optional[Any] = None # Any: can be raw tensor or processed tensor
+    data_handle: Optional[bytes] = None
     # Whether the item has been materialized
     materialized: bool = False
 
@@ -195,7 +200,7 @@ class MultimodalItem:
     error_message: Optional[str] = None
 
     def __post_init__(self):
-        if self.data is not None:
+        if self.data is not None or self.data_handle is not None:
             self.materialized = True
 
 
@@ -226,8 +231,30 @@ class MultimodalItem:
         else:
             return self.data
 
+    def load(self):
+        try:
+            if self.modality_type == "image":
+                self.data = load_image(self.url, format="pil", device="cpu")
+                self.materialized = True
+            elif self.modality_type == "video":
+                assert False, "video is not supported yet"
+                #self.coroutine = load_video(self.url)
+            else:
+                raise ValueError(f"Unknown modality type: {self.modality_type}")
+        except Exception as e:
+            self.materialized = False
+            self.error_message = str(e)
+
     @staticmethod
     async def process_items(items: List['MultimodalItem']) -> AsyncIterator['MultimodalItem']:
+        """Process a list of items concurrently and yield them as they complete.
+
+        Args:
+            items: List of MultimodalItems to process
+
+        Yields:
+            MultimodalItems as they complete loading
+        """
         # Create tasks for all items
         tasks = {}
         for item in items:
@@ -286,6 +313,32 @@ class MultimodalRequest:
         # TODO: check if any item AND output better err msg
         return any(item.error_message for item in self.items)
 
+    async def prefetch(self):
+        await asyncio.gather(*[item.async_prefetch() for item in self.items])
+
+    @nvtx_range_debug("fetch",
+                      color="blue",
+                      category="MultimodalRequest")
+    async def fetch(self):
+        """Load and fill data for all items in the request.
+
+        This method will:
+        1. Initialize loading for all items using prefetch()
+        2. Process all items concurrently and wait for them to complete
+        3. Update the request state based on the results
+
+        Returns:
+            bool: True if all items were loaded successfully, False otherwise
+        """
+        await self.prefetch()
+        async for item in MultimodalItem.process_items(self.items):
+            item.coroutine = None
+            item.data_handle = None # TODO: need to remove this
+
+    def load(self):
+        for item in self.items:
+            item.load()
+
     @classmethod
     def from_chat_messages(cls, messages) -> "MultimodalRequest":
         request = cls()
@@ -310,7 +363,7 @@ class MultimodalRequest:
                         url = cast(str, url)
                         request.items.append(MultimodalItem(req_id=request.id, id=count, modality_type="image", url=url))
                         count += 1
-                # Handle video_url type
+                # TODO: Handle video_url type hasn't been tested yet
                 elif part_type == "video_url":
                     url = part.get("video_url", {}).get("url")
                     if url:
@@ -348,7 +401,7 @@ class MultimodalResponse:
     error_message: Optional[str] = None
     cp_event: Optional[torch.cuda.Event] = None
 
-    def set_embeddings(self, embeddings: torch.Tensor, cp_event: torch.cuda.Event) -> None:
+    def set_embeddings(self, embeddings: torch.Tensor, cp_event: Optional[torch.cuda.Event] = None) -> None:
         """Set the embeddings for the response."""
         self.embeddings = embeddings
         self.cp_event = cp_event
@@ -379,17 +432,42 @@ class MultimodalResponse:
         })
 
     def get_params(self):
+        import base64
+        
         if self.embedding_handle:
-            self.embeddings = ForkingPickler.loads(self.embedding_handle)
+            # Convert the serialized tensor info to a JSON-serializable format
+            embeddings = []
+            for tensor_info in self.embedding_handle:
+                # Convert tensor info to a basic dict with only serializable values
+                serializable_info = {
+                    "tensor_size": list(tensor_info["tensor_size"]),
+                    "tensor_stride": list(tensor_info["tensor_stride"]),
+                    "tensor_offset": tensor_info["tensor_offset"],
+                    "dtype": str(tensor_info["dtype"]),
+                    "storage_device": tensor_info["storage_device"],
+                    "storage_handle": base64.b64encode(tensor_info["storage_handle"]).decode('utf-8'),
+                    "storage_size_bytes": tensor_info["storage_size_bytes"],
+                    "storage_offset_bytes": tensor_info["storage_offset_bytes"],
+                    "requires_grad": tensor_info["requires_grad"],
+                    "ref_counter_handle": base64.b64encode(tensor_info["ref_counter_handle"]).decode('utf-8'),
+                    "ref_counter_offset": tensor_info["ref_counter_offset"],
+                    "event_handle": base64.b64encode(tensor_info["event_handle"]).decode('utf-8'),
+                    "event_sync_required": tensor_info["event_sync_required"]
+                }
+                embeddings.append(serializable_info)
+        else:
+            embeddings = None
+            
         return MultimodalParams(
             id=self.request_id,
-            embeddings=self.embeddings,
+            embeddings=embeddings,
             mrope_config=self.mrope_config,
             num_items=self.num_items,
             item_offsets=self.item_offsets,
             item_token_length=self.item_token_length)
 
 @dataclass(slots=True)
+# TODO: Remove redundant fields
 class MultimodalParams:
     id: int
     embeddings: torch.Tensor = None
@@ -397,3 +475,53 @@ class MultimodalParams:
     num_items: int = 0
     item_offsets: List[int] = field(default_factory=list)
     item_token_length: List[int] = field(default_factory=list)
+
+
+class SharedCUDATensorSerializer:
+    @staticmethod
+    def serialize(obj):
+        assert isinstance(obj, list)
+        serialized = []
+        for name, tensor in obj:
+            _storage = tensor._typed_storage()
+            assert _storage.device.type == "cuda", "SharedCUDATensorSerializer only supports cuda tensors"
+            (
+                storage_device,
+                storage_handle,
+                storage_size_bytes,
+                storage_offset_bytes,
+                ref_counter_handle,
+                ref_counter_offset,
+                event_handle,
+                event_sync_required,
+            ) = _storage._share_cuda_()
+            cuda_tensor_info = {
+                "name": name,
+                "tensor_cls": type(tensor),
+                "tensor_size": tensor.shape,
+                "tensor_stride": tensor.stride(),
+                "tensor_offset": tensor.storage_offset(),
+                "storage_cls": type(_storage),
+                "dtype": tensor.dtype,
+                "storage_device": storage_device,
+                "storage_handle": storage_handle,
+                "storage_size_bytes": storage_size_bytes,
+                "storage_offset_bytes": storage_offset_bytes,
+                "requires_grad": tensor.requires_grad,
+                "ref_counter_handle": ref_counter_handle,
+                "ref_counter_offset": ref_counter_offset,
+                "event_handle": event_handle,
+                "event_sync_required": event_sync_required,
+            }
+            serialized.append(cuda_tensor_info)
+        return serialized
+
+    @staticmethod
+    def deserialize(data):
+        deserialized = []
+        for serialized in data:
+            name = serialized.pop("name")
+            rebuilt_tensor = rebuild_cuda_tensor(**serialized)
+            deserialized.append((name, rebuilt_tensor))
+        return deserialized
+

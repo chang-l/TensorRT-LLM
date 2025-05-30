@@ -16,9 +16,9 @@ import weakref
 from tensorrt_llm._utils import nvtx_range_debug
 from tensorrt_llm.inputs import create_input_processor
 from tensorrt_llm.executor.request import MultimodalRequest
-
+import asyncio
 from tensorrt_llm.bindings import executor as tllm
-
+import time
 class MultimodalEncoder:
 
     def __init__(self,
@@ -108,24 +108,47 @@ class MultimodalEncoder:
         self,
         mm_requests: List[MultimodalRequest],
     ):
+        """Generate embeddings for multiple multimodal requests in parallel.
 
-        futures = []
-        for i, request_inputs in enumerate(mm_requests):
-            # future is a
-            future = self.generate_async(
-                request_inputs,
-            )
-            futures.append(future)
-        for future in futures:
-            future.result()
+        Args:
+            mm_requests: List of multimodal requests to process
 
-        return futures
+        Returns:
+            List of generation results
+        """
+        async def _process_requests():
+            # Submit all requests first
+            futures = []
+            for request in mm_requests:
+                future = await self.generate_async(request)
+                futures.append(future)
+
+            # Then wait for all results
+            results = []
+            for future in futures:
+                result = await future.aresult()
+                results.append(result)
+            return results
+
+        # Run the async operations in an event loop
+        return asyncio.run(_process_requests())
 
     @nvtx_range_debug("Encoder.generate_async", color="green", category="Encoder")
-    def generate_async(
+    async def generate_async(
         self,
         mm_request: MultimodalRequest,
     ):
+        """Generate embeddings for a multimodal request asynchronously.
+
+        Args:
+            mm_request: The multimodal request containing items to process
+
+        Returns:
+            A promise that will be resolved with the generation results
+        """
+        # First fetch and load all the data
+        await mm_request.fetch()
+        # Then generate the embeddings asynchronously
         result = self._executor.generate_multimodal_async(
             mm_request,
         )
@@ -143,15 +166,11 @@ class MultimodalEncoder:
         if self._engine_dir is not None:
             self.args.model = self._engine_dir
 
-        # Multimodal special handling:
-        # 1. Default load_tokenizer may fail because MM has different tokenizer configuration. Hence we initialize it inside input processor
-        # 2. May need to modify model weights for MM (e.g., resize vocab embedding). We must do such operation via input processor's __init__
-        #self.input_processor = create_input_processor(self._hf_model_dir, None)
-
         max_batch_size = self.args.max_batch_size or self.args.build_config.max_batch_size
         # In _build_model method:
         executor_config = tllm.ExecutorConfig(1)
-        executor_config.backend = "multimodal"
+        executor_config.backend = "pytorch"
+        executor_config.mm_encoder_only = True
         executor_config.mapping = self.args.parallel_config.to_mapping()
         executor_config.build_config = self.args.build_config
         executor_config.hf_model_dir = self._hf_model_dir

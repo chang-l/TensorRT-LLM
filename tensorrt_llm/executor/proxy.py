@@ -26,6 +26,7 @@ from .utils import (ErrorResponse, IntraProcessQueue, WorkerCommIpcAddrs,
                     create_mpi_comm_session, get_spawn_proxy_process_env,
                     is_llm_response)
 from .worker import ExecutorBindingsWorker, worker_main
+from .._utils import nvtx_range_debug
 
 __all__ = [
     "ExecutorBindingsProxy",
@@ -384,6 +385,9 @@ class ExecutorBindingsProxy(GenerationExecutor):
         # Process the errors in-case error during shutting down the threads
         self._handle_background_error()
 
+    @nvtx_range_debug("submit_mm",
+                      color="yellow",
+                      category="proxy_submit")
     def submit_mm(self, request):
         """Submit a multimodal request for processing.
 

@@ -17,9 +17,10 @@ from tensorrt_llm.llmapi.disagg_utils import (CtxGenServerConfig,
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_dict
 from tensorrt_llm.llmapi.reasoning_parser import ReasoningParserFactory
 from tensorrt_llm.logger import logger, severity_map
-from tensorrt_llm.serve import OpenAIDisaggServer, OpenAIServer
+from tensorrt_llm.serve import OpenAIDisaggServer, OpenAIServer, OpenAIMultiModalDisaggServer
 from tensorrt_llm._torch.mm_encoder import MultimodalEncoder
 from tensorrt_llm.serve.encoder_server import OpenAIEncoderServer
+
 
 def get_llm_args(model: str,
                  tokenizer: Optional[str] = None,
@@ -349,6 +350,23 @@ def disaggregated(config_file: Optional[str], server_start_timeout: int,
                                 ctx_router_config=disagg_cfg.ctx_router_config,
                                 gen_router_config=disagg_cfg.gen_router_config)
 
+    asyncio.run(server(disagg_cfg.hostname, disagg_cfg.port))
+
+def multi_modal_disagg(config_file: Optional[str], server_start_timeout: int,
+                  request_timeout: int):
+    """Running server in multi-modal disaggregated mode"""
+    disagg_cfg = parse_disagg_config_file_with_mm(config_file)
+
+    mm_server_urls, ctx_server_urls, gen_server_urls = get_mm_ctx_gen_server_urls(
+        disagg_cfg.server_configs)
+
+    server = OpenAIMultiModalDisaggServer(ctx_servers=ctx_server_urls,
+                                gen_servers=gen_server_urls,
+                                mm_servers=mm_server_urls,
+                                req_timeout_secs=request_timeout,
+                                server_start_timeout_secs=server_start_timeout,
+                                ctx_router_config=disagg_cfg.ctx_router_config,
+                                gen_router_config=disagg_cfg.gen_router_config)
     asyncio.run(server(disagg_cfg.hostname, disagg_cfg.port))
 
 

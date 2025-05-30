@@ -339,7 +339,7 @@ class LLM:
             _postproc_params.postproc_args.num_prompt_tokens = len(
                 prompt_token_ids)
 
-        print(f"mm_embedding: {multimodal_embedding.reshape(-1)[:1]}")
+        print(f"mm_embedding: {multimodal_embedding.reshape(-1)[:5]}")
         result = self._executor.generate_async(
             prompt_token_ids,
             query_token_ids=query_token_ids,

@@ -16,6 +16,8 @@ import threading
 from tensorrt_llm.executor.request import MultimodalRequest, MultimodalItem, MultimodalResponse
 from ..llm_request import ExecutorResponse
 from multiprocessing.reduction import ForkingPickler
+from tensorrt_llm.executor.request import SharedCUDATensorSerializer
+from torchvision.transforms import ToTensor
 logger = logging.getLogger(__name__)
 
 class MMExecutor(PyExecutor):
@@ -171,7 +173,6 @@ class MMExecutor(PyExecutor):
         batch_size = len(scheduled_requests)
         return scheduled_requests, batch_size
 
-
     @nvtx_range("_forward")
     def _forward(self,
                       scheduled_requests):
@@ -201,9 +202,12 @@ class MMExecutor(PyExecutor):
             with self.response_cv:
                 for req_id, resp in responses.items():
 
-                    if isinstance(resp, MultimodalResponse) and resp.cp_event is not None:
-                        resp.cp_event.synchronize()
-                        resp.embedding_handle = bytes(ForkingPickler.dumps(resp.embeddings))
+                    if isinstance(resp, MultimodalResponse):
+                        if resp.cp_event is not None:
+                            resp.cp_event.synchronize()
+                        #resp.embedding_handle = bytes(ForkingPickler.dumps(resp.embeddings))
+                        resp.embedding_handle = SharedCUDATensorSerializer.serialize([("embeddings", resp.embeddings)]) # share this cuda tensor with other prcs
+
                         resp.embeddings = None
                         resp.cp_event = None
 
@@ -247,12 +251,14 @@ class MMExecutor(PyExecutor):
             response = request.create_response()
             if response:
                 # Extract this request's portion of embeddings
-                request_embedding = mm_embeddings[start_idx:end_idx].to('cpu', non_blocking=True)
-                cp_event = torch.cuda.Event()
-                cp_event.record()
+                request_embedding = mm_embeddings[start_idx:end_idx]
+                #.to('cpu', non_blocking=True)
+                #cp_event = torch.cuda.Event()
+                #cp_event.record()
 
                 # Attach the fused embedding directly to the response (un-ready due to non_blocking D2H transfer)
-                response.set_embeddings(request_embedding, cp_event)
+                #response.set_embeddings(request_embedding, cp_event)
+                response.set_embeddings(request_embedding)
 
                 # Attach mrope config if available
                 if mrope_config is not None:
@@ -316,7 +322,6 @@ class MMExecutor(PyExecutor):
         return []
 
 
-
 class MultimodalModelEngine(PyTorchModelEngine):
     def __init__(
         self,
@@ -344,16 +349,19 @@ class MultimodalModelEngine(PyTorchModelEngine):
         # 1. prefetch all the contents
         all_mm_items = []
         for request in scheduled_requests:
-            await asyncio.gather(*[item.async_prefetch() for item in request.items])
+            #await asyncio.gather(*[item.async_prefetch() for item in request.items])
             all_mm_items.extend(request.items)
 
         # 2. Process items and track their completion
         processed_items = {}  # Dict to track processed items by (req_id, item_id)
 
         # Process items asynchronously
-        async for ready_item in MultimodalItem.process_items(all_mm_items):
-            if not ready_item.materialized:
-                continue
+        #async for ready_item in MultimodalItem.process_items(all_mm_items):
+        for ready_item in all_mm_items:
+            # ready_item.data = ForkingPickler.loads(ready_item.data_handle)
+
+            #if not ready_item.materialized:
+            #    continue
 
             # Calculate token length and preprocess
             # https://github.com/vllm-project/vllm/blob/54631f826233dbd1c046f9a70e98bc2e25edff1a/vllm/model_executor/models/llava.py#L151
@@ -362,12 +370,8 @@ class MultimodalModelEngine(PyTorchModelEngine):
             image_size = (ready_item.data.height, ready_item.data.width)
             ready_item.length = self.model.image_size_to_num_tokens(image_size)
 
-            # TODO: Below is not necessary; just for accuracy check (PIL/Tensor format leads to slight different values)
-            #from torchvision.transforms import ToTensor
-            #ready_item.data =  ToTensor()(ready_item.data)
+            ready_item.data =  ToTensor()(ready_item.data) # Q: do we need this? does the preprocess accept PIL image input?
 
-            # each item.data is a PIL image for image modality
-            # Note: if convert to Tensor input (ToTensor()(ready_item.data)), results after preprocess will be slightly different
             ready_item.data = self.model._preprocess([ready_item.data])[0] # _preprocess involves H2D transfer
             # Store processed item with its request and item IDs
             processed_items[(ready_item.req_id, ready_item.id)] = ready_item
@@ -427,46 +431,3 @@ class MultimodalModelEngine(PyTorchModelEngine):
     def forward(self, scheduled_requests, resource_manager = None):
         batch_mm_items, batch_request_offsets = asyncio.run(self._prepare_inputs(scheduled_requests))
         return self._model_forward(batch_mm_items, batch_request_offsets)
-
-    # TODO: we can delete if no need it
-    def _postprocess_batch_outputs(self, batch_outputs: Dict, scheduled_requests: List[MultimodalRequest]):
-        """Postprocess batch outputs and attach embeddings to each request.
-
-        Args:
-            batch_outputs: Dict containing fused outputs from forward pass
-            scheduled_requests: List of requests in the batch
-
-        Returns:
-            List of responses with attached embeddings
-        """
-        if batch_outputs is None:
-            return [request.create_response() for request in scheduled_requests]
-
-        mm_embeddings = batch_outputs['mm_embeddings']
-        mrope_config = batch_outputs['mrope_config']
-        batch_request_offsets = batch_outputs['batch_request_offsets']
-
-        responses = []
-
-        # Process each request's portion of the fused embeddings
-        for i, request in enumerate(scheduled_requests):
-            start_idx = batch_request_offsets[i]
-            end_idx = batch_request_offsets[i + 1]
-
-            # Create response for this request
-            response = request.create_response()
-
-            # Extract this request's portion of embeddings
-            request_embedding = mm_embeddings[start_idx:end_idx]
-
-             # Attach the fused embedding directly to the response
-            response.set_embeddings(request_embedding)
-
-            # Attach mrope config if available
-            if mrope_config is not None:
-                response.set_mrope_config(mrope_config)
-
-            response.set_final()
-            responses.append(response)
-        return responses
-

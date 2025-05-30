@@ -442,6 +442,9 @@ class MultimodalResult:
         response = self.queue.get(timeout=timeout)
         self._handle_response(response)
 
+    @nvtx_range_debug("handle_response",
+                      color="red",
+                      category="MultimodalResult")
     def _handle_response(self,
                          response: "MultimodalResponse"):
         if isinstance(response, MultimodalResponse):

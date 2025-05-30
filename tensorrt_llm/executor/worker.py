@@ -88,8 +88,8 @@ class ExecutorBindingsWorker(GenerationExecutor):
         self._executor_config = executor_config
         self._is_pytorch_backend = getattr(self._executor_config, "backend",
                                            None) == "pytorch"
-        self._is_multimodal_backend = getattr(self._executor_config, "backend",
-                                           None) == "multimodal"
+        self._is_mm_encoder_only = getattr(self._executor_config, "mm_encoder_only",
+                                           False)
 
         if isinstance(engine, list):
             engine = engine[self.rank]
@@ -118,15 +118,17 @@ class ExecutorBindingsWorker(GenerationExecutor):
                 "engine_dir": executor_config.trt_engine_dir,
             }
             if executor_config.backend == "pytorch":
-                from tensorrt_llm._torch.pyexecutor.py_executor_creator import \
-                    create_py_executor
-                create_executor = create_py_executor
-                args["lora_config"] = lora_config
-            elif executor_config.backend == "multimodal":
-                from tensorrt_llm._torch.pyexecutor.multimodal.multimodal_pyexecutor_creator import \
-                    create_multimodal_pyexecutor
-                args.pop("engine_dir")
-                create_executor = create_multimodal_pyexecutor
+                # If mm_encoder_only is True, we use the multimodal pyexecutor that only executes the mm encoder and returns the mm embedding.
+                if self._is_mm_encoder_only:
+                    from tensorrt_llm._torch.pyexecutor.multimodal.multimodal_pyexecutor_creator import \
+                        create_multimodal_pyexecutor
+                    create_executor = create_multimodal_pyexecutor
+                    args.pop("engine_dir") # remove engine_dir as mm executor for now does not accept it
+                else:
+                    from tensorrt_llm._torch.pyexecutor.py_executor_creator import \
+                        create_py_executor
+                    create_executor = create_py_executor
+                    args["lora_config"] = lora_config
             elif executor_config.backend == "autodeploy":
                 from tensorrt_llm._torch.auto_deploy.shim.ad_executor import \
                     create_autodeploy_executor
@@ -512,6 +514,9 @@ class ExecutorBindingsWorker(GenerationExecutor):
 
         return result
 
+    @nvtx_range_debug("submit_mm",
+                      color="yellow",
+                      category="worker_submit")
     def submit_mm(self, request: MultimodalRequest):
         from .result import MultimodalResult
         """Submit a multimodal request and return a MultimodalResponse."""
@@ -863,7 +868,7 @@ class AwaitResponseHelper:
             queue = self.worker.return_queue(response.client_id)
 
             logprobs_result = _get_logprobs(self.worker, response,
-                                            self.worker._is_pytorch_backend or self.worker._is_multimodal_backend)
+                                            self.worker._is_pytorch_backend) if not self.worker._is_mm_encoder_only else None
             if logprobs_result:
                 response = ResponseWrapper(response, logprobs_result)
 
@@ -932,7 +937,7 @@ class AwaitResponseHelper:
                                          response.request_id)
             else:
                 logprobs_result = _get_logprobs(self.worker, response,
-                                                self.worker._is_pytorch_backend or self.worker._is_multimodal_backend)
+                                                self.worker._is_pytorch_backend) if not self.worker._is_mm_encoder_only else None
                 if logprobs_result:
                     response = ResponseWrapper(response, logprobs_result)
 
