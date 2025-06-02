@@ -181,8 +181,10 @@ class OpenAIServer:
             sampling_params = request.to_sampling_params()
             postproc_args = ChatPostprocArgs.from_request(request)
 
+            skip_loading = True if request.mm_params is not None else False
+
             for msg in request.messages:
-                conv_messages, mm_data = parse_chat_message_content(msg, self.model_config)
+                conv_messages, mm_data = parse_chat_message_content(msg, self.model_config, skip_loading=skip_loading)
                 conversation.extend(conv_messages)
 
             prompt: str = apply_chat_template(
@@ -224,7 +226,8 @@ class OpenAIServer:
                 sampling_params=sampling_params,
                 _postproc_params=postproc_params if self.postproc_worker_enabled else None,
                 streaming=request.stream,
-                disaggregated_params=disaggregated_params
+                disaggregated_params=disaggregated_params,
+                disagg_mm_params=request.mm_params
             )
             asyncio.create_task(self.await_disconnected(raw_request, promise))
             if not self.postproc_worker_enabled:

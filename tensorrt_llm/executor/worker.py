@@ -453,6 +453,9 @@ class ExecutorBindingsWorker(GenerationExecutor):
                 executor_request.py_logits_post_processors = lp if isinstance(
                     lp, list) else [lp]
 
+            if request.disagg_mm_params is not None:
+                executor_request.disagg_mm_params = request.disagg_mm_params
+
             if request.query_token_ids is not None:
                 # pytorch star attention workflow
                 # a workaround to avoid public interface update

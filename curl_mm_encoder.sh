@@ -1,10 +1,10 @@
 #! /usr/bin/env bash
 
 # Single image inference
-curl http://localhost:8001/v1/chat/completions \
+curl http://localhost:8800/v1/multimodal_encoder \
     -H "Content-Type: application/json"  \
     -d '{
-        "model": "llava-hf/llava-v1.6-mistral-7b-hf",
+        "model": "llava-hf/llava-v1.6-vicuna-7b-hf",
         "messages":[{
             "role": "system",
             "content": "You are a helpful assistant."

@@ -25,6 +25,7 @@ from .modeling_utils import ModelConfig, register_auto_model
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 from transformers import CLIPVisionConfig
+from ...executor.request import MultimodalParams
 
 class CLIPEncoderInfo:
 
@@ -360,10 +361,12 @@ class LlavaNextInputProcessor(InputProcessor):
     ) -> Tuple[List[int], Optional[ExtraProcessedInputs]]:
         text_prompt, mm_data = inputs.get("prompt"), inputs.get(
             "multi_modal_data", {})
-        assert 'image' in mm_data
 
         input_ids = self.tokenizer(
             text_prompt, return_tensors="pt").input_ids[0].to(self.device)
+        
+        if 'image' not in mm_data:
+            return input_ids.to(torch.int32).tolist(), {}
 
         mm_tensor = self._preprocess(mm_data['image'])
         mm_features = torch.stack(
@@ -373,6 +376,80 @@ class LlavaNextInputProcessor(InputProcessor):
             "mm_embedding": mm_features
         }
 
+
+    @nvtx_range("[Vision] postprocess")
+    def _postprocess_ids_only(self, input_ids, total_mm_tokens):
+        # Define model specific variables here before shared logic
+        mm_tokens = torch.tensor([self.model_config.image_token_index
+                                  ]).to(input_ids.device)
+        vocab_size = self.model_config.text_config.vocab_size
+        start_len = end_len = 0  # for llava, need not append start/end token around each image token
+        # End model specific variables
+
+        ## find mm token positions in input_ids
+        mm_token_positions = torch.where(torch.isin(input_ids, mm_tokens))[0]
+        num_medias = len(mm_token_positions)
+        mm_tokens_per_media = total_mm_tokens // num_medias
+        assert mm_tokens_per_media > 0, "Number of multimodal tokens per media must be greater than 0"
+
+        # TODO: 1 prompt + N media (N>=1)  only one frame per media (image only)
+        mm_lengths_per_frame = [mm_tokens_per_media] * num_medias
+        mm_lengths_per_split = [mm_tokens_per_media] * num_medias
+        mm_total_length = sum(mm_lengths_per_split)
+
+
+        ## split input_ids into segments by isolating mm tokens
+        mm_split_positions = torch.cat(
+            [mm_token_positions, mm_token_positions + 1]).unique()
+        input_ids_splits = list(input_ids.tensor_split(mm_split_positions.cpu(
+        )))  # len(input_ids_splits) = num_segments after mm tokens are isolated
+        mm_ids_splits = list(
+            torch.arange(vocab_size,
+                         vocab_size + mm_total_length,
+                         device=input_ids.device).split(mm_lengths_per_split)
+        )  # len(mm_ids_splits) = num_mm_segments
+
+        for i, mm_ids in enumerate(mm_ids_splits):
+            mm_ids = mm_ids.reshape(-1, mm_lengths_per_frame[i])
+            mm_ids_splits[i] = mm_ids.flatten()
+
+        ## replace mm token ids with the expanded out-of-vocab ids
+        mm_split_idx = 0
+        for i, split in enumerate(input_ids_splits):
+            if torch.isin(split, mm_tokens).any().item():
+                input_ids_splits[i] = mm_ids_splits[mm_split_idx]
+                mm_split_idx += 1
+        assert mm_split_idx == len(
+            mm_ids_splits), "All mm_ids_splits should be consumed"
+
+        ## concat text & mm input_ids, wrap mm feature in prompt tuning config
+        fused_input_ids = torch.cat(input_ids_splits).to(
+            device=input_ids.device)
+        assert len(fused_input_ids) == len(input_ids) + mm_total_length - num_medias, "Fused input_ids length should match the sum of text and multimodal embedding lengths"
+        #fused_length = len(input_ids) + mm_total_length + num_frames * (
+        #    start_len + end_len) - num_medias
+
+        return fused_input_ids
+
+    @torch.inference_mode()
+    def postprocess(
+        self, inputs: TextPrompt, sampling_params: SamplingParams, disagg_mm_params: MultimodalParams,
+    ) -> Tuple[List[int], Optional[ExtraProcessedInputs]]:
+        text_prompt, mm_data = inputs.get("prompt"), inputs.get(
+            "multi_modal_data", {})
+        assert 'image' in mm_data
+        model_hidden_size = self.model_config.text_config.hidden_size
+
+        input_ids = self.tokenizer(
+            text_prompt, return_tensors="pt").input_ids[0].to(self.device)
+        assert len(disagg_mm_params.embeddings) == 1, "Only one fused multimodal embedding is supported"
+        mm_handle = disagg_mm_params.embeddings[0]
+        total_mm_tokens = mm_handle['tensor_size'][0]
+        hidden_size = mm_handle['tensor_size'][-1]
+        assert model_hidden_size == hidden_size, "Multimodal embedding hidden size must match model hidden size"
+
+        fused_input_ids = self._postprocess_ids_only(input_ids, total_mm_tokens)
+        return fused_input_ids.to(torch.int32).tolist()
 
 @register_auto_model("LlavaNextForConditionalGeneration")
 @register_input_processor(LlavaNextInputProcessor)

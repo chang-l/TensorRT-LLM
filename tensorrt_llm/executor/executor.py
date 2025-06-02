@@ -30,7 +30,7 @@ from ..sampling_params import (BatchedLogitsProcessor, LogprobParams,
                                SamplingParams)
 from .ipc import FusedIpcQueue
 from .postproc_worker import PostprocParams, PostprocWorkerConfig
-from .request import GenerationRequest, LoRARequest, PromptAdapterRequest
+from .request import GenerationRequest, LoRARequest, PromptAdapterRequest, MultimodalParams
 from .result import GenerationResult, IterationResult
 from .utils import IntraProcessQueue, ProcessPoolExecutorSession, RequestError
 
@@ -120,7 +120,8 @@ class GenerationExecutor(ABC):
             mrope_config: Optional[dict] = None,
             kv_cache_retention_config: Optional[KvCacheRetentionConfig] = None,
             disaggregated_params: Optional[DisaggregatedParams] = None,
-            postproc_params: Optional[PostprocParams] = None
+            postproc_params: Optional[PostprocParams] = None,
+            disagg_mm_params: Optional[MultimodalParams] = None,
     ) -> GenerationResult:
         """Generate output for the given prompt token ids in the asynchronous mode.
         Asynchronous generation accepts single prompt only.
@@ -145,7 +146,8 @@ class GenerationExecutor(ABC):
                 multimodal_embedding=multimodal_embedding,
                 mrope_config=mrope_config,
                 kv_cache_retention_config=kv_cache_retention_config,
-                disaggregated_params=disaggregated_params))
+                disaggregated_params=disaggregated_params,
+                disagg_mm_params=disagg_mm_params))
         return result
 
     def generate_multimodal_async(

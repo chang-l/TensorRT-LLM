@@ -62,6 +62,8 @@ def retrieve_multimodal_placeholder(
     if modality == "image":
         if model_type in ("mllama", "llama4"):
             return "<|image|>"
+        if model_type in ("llava_next"):
+            return "<image>"
         if model_type in ("qwen2_vl", "qwen2_5_vl"):
             return "<|vision_start|><|image_pad|><|vision_end|>"
         raise TypeError(f"Unknown {modality} model type: {model_type}")
@@ -108,7 +110,7 @@ def _parse_chat_message_content_mm_part(
     return part_type, "unknown part_type content"
 
 
-def parse_chat_message_content_part(part: ChatCompletionMessageParam, ):
+def parse_chat_message_content_part(part: ChatCompletionMessageParam, skip_loading: bool = False):
     if isinstance(part, str):  # Handle plain text parts
         return part
 
@@ -132,10 +134,16 @@ def parse_chat_message_content_part(part: ChatCompletionMessageParam, ):
     # Handle all non-text multimodal types
     if part_type == "image_url":
         str_content = cast(str, content)
-        mm_content = {"image": load_image(str_content)}
+        if not skip_loading:
+            mm_content = {"image": load_image(str_content)}
+        else:
+            mm_content = {"image": str_content}
     elif part_type == "video_url":
         str_content = cast(str, content)
-        mm_content = {"video": load_video(str_content, num_frames=8)}
+        if not skip_loading:
+            mm_content = {"video": load_video(str_content, num_frames=8)}
+        else:
+            mm_content = {"video": str_content}
     else:
         raise NotImplementedError(f"Unknown part type: {part_type}")
 
@@ -146,12 +154,13 @@ def parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionMessageParam],
     model_config: AutoConfig,
+    skip_loading: bool = False,
 ) -> List[ConversationMessage]:
     content = []
     mm_content_dict = {}
 
     for part in parts:
-        parse_res, mm_content = parse_chat_message_content_part(part, )
+        parse_res, mm_content = parse_chat_message_content_part(part, skip_loading)
         if parse_res:
             content.append(parse_res)
 
@@ -173,6 +182,7 @@ def parse_chat_message_content_parts(
 def parse_chat_message_content(
     message: ChatCompletionMessageParam,
     model_config: AutoConfig,
+    skip_loading: bool = False,
 ) -> Tuple[List[ConversationMessage], Optional[Dict[str, List[Any]]]]:
     role = message["role"]
     content = message.get("content")
@@ -188,6 +198,7 @@ def parse_chat_message_content(
         role,
         content,
         model_config,
+        skip_loading,
     )
     return result, mm_data
 
@@ -235,9 +246,28 @@ def apply_chat_template(
     if hf_chat_template is None:
         raise ValueError(
             "No chat template found for the given tokenizer and tools.")
-
+    
+    # TODO: clean this up
+    # Structured content is detected for the hf_chat_template
+    if "message['content'][0]['text']" in hf_chat_template or "content['text']" in hf_chat_template:
+        print("Requires structured content in the chat template")
+        requires_structured_content = True
+    # Convert ConversationMessage objects to the format expected by the chat template
+    if requires_structured_content:
+        # For LLaVA-Next models, convert string content to structured format
+        formatted_conversation = []
+        for msg in conversation:
+            formatted_msg = {
+                'role': msg['role'],
+                'content': [{'type': 'text', 'text': msg['content']}]
+            }
+            formatted_conversation.append(formatted_msg)
+    else:
+        # For other models, use the ConversationMessage format as-is
+        formatted_conversation = conversation
+    
     return tokenizer.apply_chat_template(
-        conversation=conversation,
+        conversation=formatted_conversation,
         tokenize=False,
         add_generation_prompt=add_generation_prompt,
         tools=tools,

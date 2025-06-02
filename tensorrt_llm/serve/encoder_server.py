@@ -18,6 +18,7 @@ from tensorrt_llm.executor.request import MultimodalRequest, MultimodalParams
 from pathlib import Path
 from tensorrt_llm.serve.openai_protocol import ModelList, ModelCard
 from tensorrt_llm.serve.openai_server import OpenAIServer
+from dataclasses import asdict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -101,10 +102,12 @@ class OpenAIEncoderServer:
 
         try:
             mm_request = MultimodalRequest.from_chat_messages(request.messages)
+            if len(mm_request.items) == 0:
+                return JSONResponse(content={})
             promise = await self.encoder.generate_async(mm_request)
             asyncio.create_task(self.await_disconnected(raw_request, promise))
             response = await create_mm_embedding_response(promise)
-            return response
+            return JSONResponse(content=asdict(response))
 
         except CppExecutorError:
             # If internal executor error is raised, shutdown the server

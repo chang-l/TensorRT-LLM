@@ -36,7 +36,6 @@ TIMEOUT_KEEP_ALIVE = 10  # seconds.
 class OpenAIMultiModalDisaggServer:
 
     def __init__(self,
-                 ctx_servers: List[str] = None,
                  gen_servers: List[str] = None,
                  mm_servers: List[str] = None,
                  req_timeout_secs: int = 180,
@@ -44,21 +43,18 @@ class OpenAIMultiModalDisaggServer:
                  ctx_router_config: Optional[RouterConfig] = None,
                  gen_router_config: Optional[RouterConfig] = None):
 
-        self.ctx_servers = ctx_servers
+        self.ctx_servers = None
         self.gen_servers = gen_servers
         self.mm_servers = mm_servers
         assert len(mm_servers) == 1, "Currently only one multimodal server is supported"
-        assert gen_servers is None or len(gen_servers) == 0, "Let's first support E + PD for now"
+        # We should remove this restriction pretty soon (also need to modify the broadcast mm_embed logic in model runner)
+        assert len(gen_servers) == 1, "Currently only one generation server is supported"
         #self.gen_router = create_router(gen_router_config, gen_servers)
-        self.ctx_router = create_router(ctx_router_config, ctx_servers)
+        #self.ctx_router = create_router(ctx_router_config, ctx_servers)
 
         #self.mm_router = create_router(mm_router_config, mm_servers)
 
-        #if (len(self.gen_servers) == 0):
-        #    raise ValueError("At least one generation server must be provided")
-
-        if os.getenv("TRTLLM_DISAGG_BENCHMARK_GEN_ONLY") != "1" and len(ctx_servers) == 0:
-            raise ValueError("At least one context server must be provided")
+        assert os.getenv("TRTLLM_DISAGG_BENCHMARK_GEN_ONLY") != "1", "Multimodal disaggregated mode is not supported in disaggregated_gen benchmark mode"
 
         # Session will be initialized in lifespan
         self.session: Optional[aiohttp.ClientSession] = None
@@ -130,9 +126,12 @@ class OpenAIMultiModalDisaggServer:
                 yield chunk
 
         finally:
-            await self.gen_router.finish_request(gen_req)
+            #await self.gen_router.finish_request(gen_req)
+            pass
 
     async def openai_completion(self, req: CompletionRequest) -> Response:
+        # TODO: support completion mode later
+        assert len(self.mm_servers) == 0, "Multimodal disaggregated mode is not supported in completion mode yet"
         try:
             gen_req = copy.deepcopy(req)
             if not isinstance(req.prompt, str):
@@ -157,7 +156,13 @@ class OpenAIMultiModalDisaggServer:
 
             # Step 2: Append multimodal response directly to the original request
             if mm_response and 'embeddings' in mm_response and len(mm_response['embeddings']) > 0:
-                req.mm_params = MultimodalParams(embeddings=mm_response['embeddings'])
+                req.mm_params = MultimodalParams(
+                    embeddings=mm_response['embeddings'],
+                    mrope_config=mm_response.get('mrope_config'),
+                    num_items=mm_response.get('num_items', 0),
+                    item_offsets=mm_response.get('item_offsets', []),
+                    item_token_length=mm_response.get('item_token_length', [])
+                )
 
             return await self._process_generation_server_request(req)
 
@@ -179,12 +184,15 @@ class OpenAIMultiModalDisaggServer:
             # Disable streaming for multimodal requests
             mm_req.stream = False
 
-            # Send request to multimodal server and get MultimodalParams directly
+            # Send request directly to multimodal server
             async with self.session.post(
                 self.mm_servers[0] + "/v1/multimodal_encoder",
-                json=mm_req
+                json=mm_req.model_dump(exclude_unset=True)
             ) as response:
-                return await response.json()
+                if not response.ok:
+                    response.raise_for_status()
+                response_dict = await response.json()
+                return response_dict
 
         except Exception as e:
             logging.error(f"Error processing multimodal request: {str(e)}")
@@ -203,22 +211,27 @@ class OpenAIMultiModalDisaggServer:
             gen_req.disaggregated_params.request_type = "generation_only"
         else:
             if gen_req.disaggregated_params is not None:
+                # TODO: support E+PD for now; later we can support E+P+D
                 del gen_req.disaggregated_params
 
         # Pick a generation server and send request
-        gen_server, _ = await self.gen_router.get_next_server(gen_req)
-        logging.info("Sending request to gen server: %s", gen_server)
-
+        # gen_server, _ = await self.gen_router.get_next_server(gen_req)
+        # TODO: support gen_server routing
+        gen_server = self.gen_servers[0]
+        
         if not gen_req.stream:
             try:
                 if isinstance(gen_req, CompletionRequest):
+                    # TODO: support completion mode later
+                    assert 0, "Completion mode is not supported in multimodal disaggregated mode yet"
                     gen_response = await self.send_completion_request(gen_server, gen_req)
                 elif isinstance(gen_req, ChatCompletionRequest):
                     gen_response = await self.send_chat_request(gen_server, gen_req)
-
                 return gen_response
             finally:
-                await self.gen_router.finish_request(gen_req)
+                # TODO: support gen_router
+                #await self.gen_router.finish_request(gen_req)
+                pass
         else:
             # Return a streaming response that combines both context and generation responses
             return StreamingResponse(
@@ -268,14 +281,14 @@ class OpenAIMultiModalDisaggServer:
             response_generator = create_generator(url, request)
             return StreamingResponse(content=response_generator, media_type="text/event-stream")
         else:
-            async with self.session.post(url + endpoint, json=request.model_dump(exclude_unset=True)) as response:
+            request_json = request.model_dump(exclude_unset=True)
+            async with self.session.post(url + endpoint, json=request_json) as response:
                 content_type = response.headers.get("Content-Type", "")
                 if "text/event-stream" in content_type:
                     raise ValueError("Received an event-stream although request stream was False")
 
                 response_dict = await response.json()
                 if not response.ok:
-                    logging.error(f"Received failed response {response_dict}")
                     response.raise_for_status()
                 return response_type(**response_dict)
 
@@ -294,7 +307,9 @@ class OpenAIMultiModalDisaggServer:
 
     async def wait_for_servers_ready(self, server_start_timeout_secs: int = 180):
         async def are_servers_ready():
-            context_ready = all([await self.check_server_ready(url) for url in self.ctx_servers])
+            context_ready = True
+            if self.ctx_servers is not None:
+                context_ready = all([await self.check_server_ready(url) for url in self.ctx_servers])
             generation_ready = all([await self.check_server_ready(url) for url in self.gen_servers])
             return context_ready and generation_ready
 

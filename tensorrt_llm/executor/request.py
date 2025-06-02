@@ -120,6 +120,14 @@ class PromptAdapterRequest:
     def local_path(self):
         return self.prompt_adapter_local_path
 
+@dataclass(slots=True)
+# TODO: Remove redundant fields
+class MultimodalParams:
+    embeddings: Any = None
+    mrope_config: Optional[dict] = None
+    num_items: int = 0
+    item_offsets: List[int] = field(default_factory=list)
+    item_token_length: List[int] = field(default_factory=list)
 
 class GenerationRequest:
 
@@ -137,6 +145,7 @@ class GenerationRequest:
         kv_cache_retention_config: Optional[KvCacheRetentionConfig] = None,
         disaggregated_params: Optional[DisaggregatedParams] = None,
         postproc_params: Optional[PostprocParams] = None,
+        disagg_mm_params: Optional[MultimodalParams] = None,
     ):
         if isinstance(prompt_token_ids, list):
             self.prompt_token_ids = prompt_token_ids
@@ -160,6 +169,7 @@ class GenerationRequest:
         self.kv_cache_retention_config = kv_cache_retention_config
         self.id: Optional[int] = None
         self.disaggregated_params = disaggregated_params
+        self.disagg_mm_params = disagg_mm_params
 
     def set_id(self, id):
         assert self.id is None, f"Request ID is already set: {self.id}"
@@ -433,7 +443,7 @@ class MultimodalResponse:
 
     def get_params(self):
         import base64
-        
+
         if self.embedding_handle:
             # Convert the serialized tensor info to a JSON-serializable format
             embeddings = []
@@ -457,24 +467,13 @@ class MultimodalResponse:
                 embeddings.append(serializable_info)
         else:
             embeddings = None
-            
+
         return MultimodalParams(
-            id=self.request_id,
             embeddings=embeddings,
             mrope_config=self.mrope_config,
             num_items=self.num_items,
             item_offsets=self.item_offsets,
             item_token_length=self.item_token_length)
-
-@dataclass(slots=True)
-# TODO: Remove redundant fields
-class MultimodalParams:
-    id: int
-    embeddings: torch.Tensor = None
-    mrope_config: Optional[dict] = None
-    num_items: int = 0
-    item_offsets: List[int] = field(default_factory=list)
-    item_token_length: List[int] = field(default_factory=list)
 
 
 class SharedCUDATensorSerializer:

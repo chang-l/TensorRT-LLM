@@ -1,6 +1,6 @@
 import asyncio
 import os
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union, Tuple
 
 import click
 import torch
@@ -12,8 +12,8 @@ from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
 from tensorrt_llm.llmapi import (LLM, BuildConfig, CapacitySchedulerPolicy,
                                  DynamicBatchConfig, KvCacheConfig,
                                  SchedulerConfig)
-from tensorrt_llm.llmapi.disagg_utils import (CtxGenServerConfig,
-                                              parse_disagg_config_file)
+from tensorrt_llm.llmapi.disagg_utils import (CtxGenServerConfig, MultimodalServerConfig,
+                                              parse_disagg_config_file, parse_mm_disagg_config_file)
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_dict
 from tensorrt_llm.llmapi.reasoning_parser import ReasoningParserFactory
 from tensorrt_llm.logger import logger, severity_map
@@ -306,16 +306,22 @@ def serve_encoder(model: str, host: str, port: int,
 
 
 def get_ctx_gen_server_urls(
-        server_configs: List[CtxGenServerConfig]) -> List[str]:
+        server_configs: List[Union[CtxGenServerConfig, MultimodalServerConfig]]) -> Tuple[List[str], List[str]]:
     ctx_server_urls = []
     gen_server_urls = []
+    mm_server_urls = []
     for cfg in server_configs:
         if cfg.type == "ctx":
             ctx_server_urls.append(f"http://{cfg.hostname}:{cfg.port}")
-        else:
+        elif cfg.type == "gen":
             gen_server_urls.append(f"http://{cfg.hostname}:{cfg.port}")
+        elif cfg.type == "mm":
+            mm_server_urls.append(f"http://{cfg.hostname}:{cfg.port}")
 
-    return ctx_server_urls, gen_server_urls
+    if len(mm_server_urls) > 0:
+        return mm_server_urls, gen_server_urls
+    else:
+        return ctx_server_urls, gen_server_urls
 
 
 @click.command("disaggregated")
@@ -352,21 +358,38 @@ def disaggregated(config_file: Optional[str], server_start_timeout: int,
 
     asyncio.run(server(disagg_cfg.hostname, disagg_cfg.port))
 
-def multi_modal_disagg(config_file: Optional[str], server_start_timeout: int,
+# TODO: add merge this mode into offical disaggregated mode
+@click.command("multimodal_disaggregated")
+@click.option("-c",
+              "--config_file",
+              type=str,
+              default=None,
+              help="Specific option for disaggregated mode.")
+@click.option("-t",
+              "--server_start_timeout",
+              type=int,
+              default=180,
+              help="Server start timeout")
+@click.option("-r",
+              "--request_timeout",
+              type=int,
+              default=180,
+              help="Request timeout")
+def multimodal_disaggregated(config_file: Optional[str], server_start_timeout: int,
                   request_timeout: int):
-    """Running server in multi-modal disaggregated mode"""
-    disagg_cfg = parse_disagg_config_file_with_mm(config_file)
+    """Running server in multimodal disaggregated mode"""
+    disagg_cfg = parse_mm_disagg_config_file(config_file)
 
-    mm_server_urls, ctx_server_urls, gen_server_urls = get_mm_ctx_gen_server_urls(
+    mm_server_urls, gen_server_urls = get_ctx_gen_server_urls(
         disagg_cfg.server_configs)
+    print(f"mm_server_urls: {mm_server_urls}, gen_server_urls: {gen_server_urls}, disaggregated_cfg: {disagg_cfg.server_configs}")
 
-    server = OpenAIMultiModalDisaggServer(ctx_servers=ctx_server_urls,
-                                gen_servers=gen_server_urls,
-                                mm_servers=mm_server_urls,
-                                req_timeout_secs=request_timeout,
-                                server_start_timeout_secs=server_start_timeout,
-                                ctx_router_config=disagg_cfg.ctx_router_config,
-                                gen_router_config=disagg_cfg.gen_router_config)
+    server = OpenAIMultiModalDisaggServer(gen_servers=gen_server_urls,
+                                          mm_servers=mm_server_urls,
+                                          req_timeout_secs=request_timeout,
+                                          server_start_timeout_secs=server_start_timeout,
+                                          ctx_router_config=None,
+                                          gen_router_config=None)
     asyncio.run(server(disagg_cfg.hostname, disagg_cfg.port))
 
 
@@ -456,6 +479,7 @@ main = DefaultGroup(
         "serve": serve,
         "disaggregated": disaggregated,
         "disaggregated_mpi_worker": disaggregated_mpi_worker,
+        "disaggregated_mm": multimodal_disaggregated,
         "encoder": serve_encoder
     })
 
