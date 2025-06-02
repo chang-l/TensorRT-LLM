@@ -21,7 +21,7 @@ from .utils import ErrorResponse, has_event_loop, is_llm_response
 if TYPE_CHECKING:
     from .executor import GenerationExecutor
     from .postproc_worker import PostprocParams, PostprocWorker
-    from .request import GenerationRequest, ImageEncodingRequest
+    from .request import GenerationRequest
 
 __all__ = [
     "CompletionOutput",

@@ -13,8 +13,9 @@ import uvicorn
 from tensorrt_llm.serve.openai_protocol import ChatCompletionRequest
 from tensorrt_llm.executor import CppExecutorError
 from tensorrt_llm.version import __version__ as VERSION
-from tensorrt_llm._torch.mm_encoder import MultimodalEncoder
-from tensorrt_llm.executor.request import MultimodalRequest, MultimodalParams
+from tensorrt_llm._torch.multimodal.mm_encoder import MultimodalEncoder
+from tensorrt_llm.executor.request import MultimodalRequest
+from tensorrt_llm.multimodal_params import MultimodalParams
 from pathlib import Path
 from tensorrt_llm.serve.openai_protocol import ModelList, ModelCard
 from tensorrt_llm.serve.openai_server import OpenAIServer

@@ -10,11 +10,12 @@ from ..llmapi.llm_utils import KvCacheRetentionConfig
 from ..sampling_params import SamplingParams
 from .postproc_worker import PostprocParams
 import asyncio
-from multiprocessing.reduction import ForkingPickler
 from torch.multiprocessing.reductions import rebuild_cuda_tensor
 from typing import cast
 from tensorrt_llm.inputs.utils import load_image
 from .._utils import nvtx_range_debug
+
+from ..multimodal_params import MultimodalParams
 
 __all__ = [
     "LoRARequest",
@@ -119,15 +120,6 @@ class PromptAdapterRequest:
     @property
     def local_path(self):
         return self.prompt_adapter_local_path
-
-@dataclass(slots=True)
-# TODO: Remove redundant fields
-class MultimodalParams:
-    embeddings: Any = None
-    mrope_config: Optional[dict] = None
-    num_items: int = 0
-    item_offsets: List[int] = field(default_factory=list)
-    item_token_length: List[int] = field(default_factory=list)
 
 class GenerationRequest:
 

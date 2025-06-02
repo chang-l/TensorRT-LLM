@@ -18,7 +18,7 @@ from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_dict
 from tensorrt_llm.llmapi.reasoning_parser import ReasoningParserFactory
 from tensorrt_llm.logger import logger, severity_map
 from tensorrt_llm.serve import OpenAIDisaggServer, OpenAIServer, OpenAIMultiModalDisaggServer
-from tensorrt_llm._torch.mm_encoder import MultimodalEncoder
+from tensorrt_llm._torch.multimodal.mm_encoder import MultimodalEncoder
 from tensorrt_llm.serve.encoder_server import OpenAIEncoderServer
 
 

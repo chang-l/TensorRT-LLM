@@ -1,7 +1,6 @@
 from pathlib import Path
-from typing import Any, Literal, Optional, Union, List
+from typing import Any, Optional, Union, List
 
-from transformers import PreTrainedTokenizerBase
 from tensorrt_llm.executor import GenerationExecutor
 from tensorrt_llm.llmapi.llm import LlmArgs
 from tensorrt_llm.llmapi.utils import exception_handler, get_device_count, print_colored_debug
@@ -10,17 +9,14 @@ from tensorrt_llm.logger import logger
 from tensorrt_llm.executor.utils import get_spawn_proxy_process_env, create_mpi_comm_session
 from tensorrt_llm.llmapi.mpi_session import external_mpi_comm_available, MpiPoolSession
 import tempfile
-import os
 import atexit
 import weakref
 from tensorrt_llm._utils import nvtx_range_debug
-from tensorrt_llm.inputs import create_input_processor
 from tensorrt_llm.executor.request import MultimodalRequest
 import asyncio
 from tensorrt_llm.bindings import executor as tllm
-import time
-class MultimodalEncoder:
 
+class MultimodalEncoder:
     def __init__(self,
                  model: Union[str, Path],
                  trust_remote_code: bool = False,

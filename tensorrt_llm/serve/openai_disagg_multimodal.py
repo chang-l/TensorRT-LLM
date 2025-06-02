@@ -7,7 +7,7 @@ import os
 import signal
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import List, Optional, Type, Union
+from typing import List, Optional, Type, Union, Dict, Any
 
 import aiohttp
 import uvicorn
@@ -22,11 +22,11 @@ from tensorrt_llm.serve.openai_protocol import (ChatCompletionRequest,
                                                 ChatCompletionResponse,
                                                 CompletionRequest,
                                                 CompletionResponse,
-                                                DisaggregatedParams,
                                                 ErrorResponse)
+from tensorrt_llm.multimodal_params import MultimodalParams
+
 from tensorrt_llm.serve.router import create_router
 from tensorrt_llm.version import __version__ as VERSION
-from tensorrt_llm.executor.request import MultimodalParams
 
 logging.basicConfig(level=logging.INFO)
 
@@ -155,14 +155,8 @@ class OpenAIMultiModalDisaggServer:
             mm_response = await self._process_multimodal_server_request(mm_req)
 
             # Step 2: Append multimodal response directly to the original request
-            if mm_response and 'embeddings' in mm_response and len(mm_response['embeddings']) > 0:
-                req.mm_params = MultimodalParams(
-                    embeddings=mm_response['embeddings'],
-                    mrope_config=mm_response.get('mrope_config'),
-                    num_items=mm_response.get('num_items', 0),
-                    item_offsets=mm_response.get('item_offsets', []),
-                    item_token_length=mm_response.get('item_token_length', [])
-                )
+            if mm_response and 'embeddings' in mm_response:
+                req.mm_params = MultimodalParams(**mm_response)
 
             return await self._process_generation_server_request(req)
 
@@ -179,24 +173,31 @@ class OpenAIMultiModalDisaggServer:
             logging.exception(exception)
             raise HTTPException(status_code=500, detail=f"Internal server error {str(exception)}")
 
-    async def _process_multimodal_server_request(self, mm_req: ChatCompletionRequest):
+    async def _process_multimodal_server_request(self, mm_req: ChatCompletionRequest) -> Optional[Dict[str, Any]]:
+        """
+        Process multimodal request and return response from multimodal server.
+
+        Returns:
+            Optional[Dict[str, Any]]: Response dictionary from multimodal server or None if processing failed
+        """
         try:
             # Disable streaming for multimodal requests
             mm_req.stream = False
 
-            # Send request directly to multimodal server
+            # Send request to multimodal server
             async with self.session.post(
                 self.mm_servers[0] + "/v1/multimodal_encoder",
                 json=mm_req.model_dump(exclude_unset=True)
             ) as response:
                 if not response.ok:
-                    response.raise_for_status()
-                response_dict = await response.json()
-                return response_dict
+                    error_msg = f"Multimodal server returned error: {response.status} {response.reason}"
+                    logging.error(error_msg)
+                    raise HTTPException(status_code=response.status, detail=error_msg)
+                return await response.json()
 
         except Exception as e:
-            logging.error(f"Error processing multimodal request: {str(e)}")
-            raise
+            logging.error(f"Unexpected error in multimodal processing: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Multimodal processing failed: {str(e)}")
 
     async def _process_generation_server_request(self, gen_req, ctx_response=None):
         if ctx_response is not None:
@@ -218,7 +219,7 @@ class OpenAIMultiModalDisaggServer:
         # gen_server, _ = await self.gen_router.get_next_server(gen_req)
         # TODO: support gen_server routing
         gen_server = self.gen_servers[0]
-        
+
         if not gen_req.stream:
             try:
                 if isinstance(gen_req, CompletionRequest):
@@ -273,7 +274,7 @@ class OpenAIMultiModalDisaggServer:
             yield chunk
 
     async def send_request(self, url: str,
-                           request: Union[CompletionRequest, ChatCompletionRequest, MultimodalParams],
+                           request: Union[CompletionRequest, ChatCompletionRequest],
                            endpoint: str,
                            response_type: Type[Union[CompletionResponse, ChatCompletionResponse]],
                            create_generator: callable) -> Union[CompletionResponse, ChatCompletionResponse, StreamingResponse]:

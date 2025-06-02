@@ -35,7 +35,7 @@ from .tokenizer import TokenizerBase, _xgrammar_tokenizer_info
 # TODO[chunweiy]: move the following symbols back to utils scope, and remove the following import
 from .utils import (append_docstring, exception_handler, get_device_count,
                     print_colored_debug)
-from ..executor.request import MultimodalParams
+from ..multimodal_params import MultimodalParams
 
 class RequestOutput(DetokenizedGenerationResultBase, GenerationResult):
     """The output data of a completion request to the LLM.
@@ -320,14 +320,14 @@ class LLM:
             query_token_ids = inputs.get("query_token_ids", None)
             extra_processed_inputs = None
         elif "prompt" in inputs:
-            
+
             if disagg_mm_params is not None:
                 prompt_token_ids = self.input_processor.postprocess(inputs, sampling_params, disagg_mm_params)
                 extra_processed_inputs = None
             else:
                 prompt_token_ids, extra_processed_inputs = self.input_processor(
                     inputs, sampling_params)
-            
+
             prompt = inputs['prompt']
             if extra_processed_inputs is not None:
                 query_token_ids = extra_processed_inputs.get('query_token_ids')

@@ -14,7 +14,7 @@ from typing_extensions import Annotated, Required, TypedDict
 
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi import GuidedDecodingParams, SamplingParams
-from tensorrt_llm.executor.request import MultimodalParams
+from tensorrt_llm.multimodal_params import MultimodalParams
 
 class OpenAIBaseModel(BaseModel):
     # OpenAI API does not allow extra fields & allow to initialize by both alias and field name

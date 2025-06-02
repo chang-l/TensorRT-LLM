@@ -20,6 +20,7 @@ from .._utils import mpi_world_size
 from ..bindings import executor as tllm
 from ..builder import Engine
 from ..disaggregated_params import DisaggregatedParams
+from ..multimodal_params import MultimodalParams
 from ..llmapi.llm_utils import KvCacheRetentionConfig
 from ..llmapi.mpi_session import (MpiSession, external_mpi_comm_available,
                                   need_spawn_mpi_workers)
@@ -30,7 +31,7 @@ from ..sampling_params import (BatchedLogitsProcessor, LogprobParams,
                                SamplingParams)
 from .ipc import FusedIpcQueue
 from .postproc_worker import PostprocParams, PostprocWorkerConfig
-from .request import GenerationRequest, LoRARequest, PromptAdapterRequest, MultimodalParams
+from .request import GenerationRequest, LoRARequest, PromptAdapterRequest
 from .result import GenerationResult, IterationResult
 from .utils import IntraProcessQueue, ProcessPoolExecutorSession, RequestError
 

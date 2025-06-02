@@ -81,7 +81,7 @@ def parse_arguments():
     return args
 
 def setup_encoder(args):
-    from tensorrt_llm._torch.mm_encoder import MultimodalEncoder
+    from tensorrt_llm._torch.multimodal.mm_encoder import MultimodalEncoder
     return MultimodalEncoder(model=args.model_dir, max_batch_size=args.max_batch_size)
 
 def main():
