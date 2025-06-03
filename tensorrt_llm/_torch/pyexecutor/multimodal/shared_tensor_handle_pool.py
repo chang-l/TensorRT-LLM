@@ -20,13 +20,13 @@ class SharedTensorPool:
         cleanup_timeout (float): Timeout in seconds for cleanup process operations.
     """
 
-    def __init__(self, max_handles: int = 5, cleanup_timeout: float = 5.0):
+    def __init__(self, max_handles: int = 5, cleanup_timeout: float = 10.0):
         self.active_handles: OrderedDict = OrderedDict()
         self.max_handles = max_handles
         self.cleanup_timeout = cleanup_timeout
         self._lock = mp.Lock()
 
-        # Setup cleanup process
+        # Setup cleanup process and make sure to use spawn subprocess for CUDA compatibility
         self.cleanup_queue = mp.Queue()
         self.cleanup_process = mp.Process(target=self._cleanup_worker, daemon=True)
         self.cleanup_process.start()
@@ -54,7 +54,8 @@ class SharedTensorPool:
                     task = self.cleanup_queue.get_nowait()
                     if task == "STOP":
                         torch.cuda.ipc_collect()
-                        return
+                        torch.cuda.empty_cache()
+                        return  # Exit immediately on STOP signal
                     elif task == "CLEANUP":
                         torch.cuda.ipc_collect()
                 except Empty:
@@ -142,4 +143,15 @@ class SharedTensorPool:
             logger.warning("Cleanup process did not terminate within timeout")
 
 # Global pool instance
-tensor_pool = SharedTensorPool()
+_tensor_pool = None
+
+def get_tensor_pool():
+    """Get or create the global tensor pool instance.
+
+    This function ensures the tensor pool is created only when needed and after
+    multiprocessing is properly set up.
+    """
+    global _tensor_pool
+    if _tensor_pool is None:
+        _tensor_pool = SharedTensorPool()
+    return _tensor_pool

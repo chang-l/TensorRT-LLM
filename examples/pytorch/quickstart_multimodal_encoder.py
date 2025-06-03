@@ -88,7 +88,7 @@ def main():
     args = parse_arguments()
 
     encoder = setup_encoder(args)
-    from tensorrt_llm.executor.request import MultimodalRequest, MultimodalItem
+    from tensorrt_llm.executor.multimodal.request import MultimodalRequest, MultimodalItem
     items = [
         MultimodalItem(
             req_id=1,
@@ -121,8 +121,8 @@ def main():
         for i in range(output.multimodal_params.num_items):
             sta = output.multimodal_params.item_offsets[i]
             end = sta + output.multimodal_params.item_token_length[i]
-            mm_embedding = output.multimodal_params.embeddings[sta:end]
-            print(f"item {i} embedding (first 10): {mm_embedding.reshape(-1)[:10]}")
+            mm_embedding = output.multimodal_params.embeddings
+            print(f"item {i} embedding: {mm_embedding}")
 
 if __name__ == "__main__":
     main()

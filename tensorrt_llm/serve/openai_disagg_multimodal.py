@@ -290,6 +290,8 @@ class OpenAIMultiModalDisaggServer:
 
                 response_dict = await response.json()
                 if not response.ok:
+                    logging.error(f"Request failed with status {response.status}")
+                    logging.error(f"Response body: {response_dict}")
                     response.raise_for_status()
                 return response_type(**response_dict)
 

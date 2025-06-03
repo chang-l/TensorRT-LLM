@@ -30,7 +30,8 @@ class MultimodalParams:
         As an experimental feature, all fields are currently optional to allow flexibility during development.
         In future, we should stabilize the interface by defining a fixed set of required fields.
     """
-    embeddings: Optional[Dict[str, Any]] = None
+    #embeddings: Optional[Dict[str, Any]] = None
+    embeddings: Optional[List[Dict[str, Any]]] = None # TODO: change to Dict[str, Any]
     mrope_config: Optional[dict] = None
     num_items: Optional[int] = 0
     item_offsets: Optional[List[int]] = None

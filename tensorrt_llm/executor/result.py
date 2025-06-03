@@ -29,7 +29,6 @@ __all__ = [
     "DetokenizedGenerationResultBase",
     "GenerationResult",
     "IterationResult",
-    "MultimodalResult",
 ]
 
 
@@ -386,109 +385,6 @@ class DetokenizedGenerationResultBase(GenerationResultBase):
 # alias
 PostprocWorker = DetokenizedGenerationResultBase.PostprocWorker
 
-# TODO: move to a separate file
-from .request import MultimodalRequest, MultimodalResponse
-class MultimodalResult:
-    def __init__(
-        self,
-        mm_request: MultimodalRequest,
-        background_error_handler: Optional[Callable] = None,
-        executor: Optional["GenerationExecutor"] = None,
-    ) -> None:
-        #self.id = mm_request.id
-        self.request_id = mm_request.id # abort_request is using request_id
-        self._background_error_handler = background_error_handler
-        self._done = False
-        self._timeout = 2
-        self._executor: Optional[weakref.ReferenceType[
-            "GenerationExecutor"]] = weakref.ref(executor) if executor else None
-        self._aborted = False
-        self.multimodal_params = None
-        if has_event_loop():
-            self.aqueue = AsyncQueue()
-            self.queue = self.aqueue.sync_q
-        else:
-            self.queue = Queue()
-            self.aqueue = None
-
-    def set_timeout(self, timeout: float):
-        self._timeout = timeout
-
-    def mark_undone(self):
-        # should be called when new prompts are submitted
-        self._done = False
-
-    @property
-    def finished(self) -> bool:
-        return self._done
-
-    async def _aresult_step(self):
-        assert self.aqueue is not None, "The asyncio event loop was not present during initialization, so async operations are not available."
-        response = await self.aqueue.get()
-        global_tracer().log_instant("result_step.get")
-        self._handle_response(response)
-
-    async def aresult(self) -> "GenerationResult":
-        """Wait for the completion of the request, and return the result.
-
-        Returns:
-            tensorrt_llm.executor.result.GenerationResult: generation result.
-        """
-        while not self._done:
-            await self._aresult_step()
-        return self
-
-    def _result_step(self, timeout: Optional[float] = None):
-        response = self.queue.get(timeout=timeout)
-        self._handle_response(response)
-
-    @nvtx_range_debug("handle_response",
-                      color="red",
-                      category="MultimodalResult")
-    def _handle_response(self,
-                         response: "MultimodalResponse"):
-        if isinstance(response, MultimodalResponse):
-            if response.has_error():
-                if self._background_error_handler is not None and (
-                        handler := self._background_error_handler()):
-                    handler(response.error_msg)
-
-            response_result = response.result
-            self._done = response_result.is_final
-            self.multimodal_params = response.get_params()
-
-            if self._background_error_handler and (
-                    handler := self._background_error_handler()):
-                handler()
-        elif isinstance(response, ErrorResponse):
-            if self._background_error_handler is not None and (
-                    handler := self._background_error_handler()):
-                handler(response.error_msg)
-            # TODO: we should not need to set done here; but proxy error_queue is always empty (?)
-            # WAR: we set done to unblock the result.get()
-            self._done = True
-        else:
-            raise ValueError(f"Unknown response type: {response}")
-
-    def result(self, timeout: Optional[float] = None) -> "GenerationResult":
-        """Wait for the completion of the request, and return the result.
-
-        Args:
-            timeout (float, optional): Timeout. Defaults to None.
-
-        Returns:
-            tensorrt_llm.executor.result.GenerationResult: generation result.
-        """
-        while not self._done:
-            self._result_step(timeout)
-        return self
-
-    def abort(self) -> None:
-        """Abort the multimodal request.
-        """
-        assert self._executor is not None, "The executor is not set for this result."
-        self._executor().abort_request(self.request_id)
-        self._aborted = True
 
 class GenerationResult(GenerationResultBase):
     '''

@@ -41,7 +41,9 @@ from .ipc import FusedIpcQueue, IpcQueue
 from .postproc_worker import (PostprocParams, PostprocWorker,
                               PostprocWorkerConfig, postproc_worker_main)
 from .request import (CancellingRequest, GenerationRequest, LoRARequest,
-                      PromptAdapterRequest, MultimodalRequest, MultimodalResponse)
+                      PromptAdapterRequest)
+from .multimodal.request import MultimodalRequest, MultimodalResponse
+from .multimodal.result import MultimodalResult
 from .result import (GenerationResult, IterationResult, LogProbsResult,
                      ResponseWrapper, compute_logprobs)
 from .utils import (PERIODICAL_RESP_IN_AWAIT, ErrorResponse, IntraProcessQueue,
@@ -521,7 +523,6 @@ class ExecutorBindingsWorker(GenerationExecutor):
                       color="yellow",
                       category="worker_submit")
     def submit_mm(self, request: MultimodalRequest):
-        from .result import MultimodalResult
         """Submit a multimodal request and return a MultimodalResponse."""
         self.start()
 

@@ -13,10 +13,9 @@ from ..model_engine import ModelEngine, PyTorchModelEngine
 from tensorrt_llm.inputs import create_input_processor
 import queue
 import threading
-from tensorrt_llm.executor.request import MultimodalRequest, MultimodalItem, MultimodalResponse
+from tensorrt_llm.executor.multimodal import MultimodalRequest, MultimodalResponse
 from ..llm_request import ExecutorResponse
-from multiprocessing.reduction import ForkingPickler
-from tensorrt_llm.executor.request import SharedCUDATensorSerializer
+from tensorrt_llm.executor.multimodal import SharedCUDATensorSerializer
 from torchvision.transforms import ToTensor
 logger = logging.getLogger(__name__)
 

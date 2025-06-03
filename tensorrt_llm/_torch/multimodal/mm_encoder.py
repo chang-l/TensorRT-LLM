@@ -12,7 +12,7 @@ import tempfile
 import atexit
 import weakref
 from tensorrt_llm._utils import nvtx_range_debug
-from tensorrt_llm.executor.request import MultimodalRequest
+from tensorrt_llm.executor.multimodal import MultimodalRequest
 import asyncio
 from tensorrt_llm.bindings import executor as tllm
 

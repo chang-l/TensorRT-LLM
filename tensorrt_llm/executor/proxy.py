@@ -18,6 +18,7 @@ from ..llmapi.tracer import enable_llm_tracer, get_tracer, global_tracer
 from ..llmapi.utils import (AsyncQueue, ManagedThread, _SyncQueue,
                             print_colored, print_colored_debug)
 from .executor import GenerationExecutor
+from .multimodal import MultimodalResult
 from .ipc import FusedIpcQueue, IpcQueue
 from .postproc_worker import PostprocWorkerConfig
 from .request import CancellingRequest, GenerationRequest
@@ -397,7 +398,6 @@ class ExecutorBindingsProxy(GenerationExecutor):
         Returns:
             MultimodalResponse: The response object that will be populated with results
         """
-        from tensorrt_llm.executor.result import MultimodalResult
         self._start_dispatch_threads()
         request.set_id(self._get_next_client_id())
         result = MultimodalResult(

@@ -51,7 +51,7 @@ from .resource_manager import (BaseResourceManager, KVCacheManager,
                                ResourceManager)
 from .scheduler import ScheduledRequests
 from torch.multiprocessing.reductions import rebuild_cuda_tensor
-from .multimodal.shared_tensor_handle_pool import tensor_pool
+
 import base64
 
 MAX_UINT64 = (1 << 64) - 1
@@ -1058,6 +1058,9 @@ class PyTorchModelEngine(ModelEngine):
             # TODO: Ideally, we should only rebuild the tensor on leader rank and then broadcast to other ranks via nccl.
             if request.py_disagg_mm_params is not None and hasattr(request.py_disagg_mm_params, 'embeddings'):
                 assert multimodal_embedding is None, "multimodal_embedding and disagg_mm_params are not supported at the same time"
+                # Lazy import tensor_pool only when needed
+                from .multimodal.shared_tensor_handle_pool import get_tensor_pool
+                tensor_pool = get_tensor_pool()
                 mm_tensor_handle = request.py_disagg_mm_params.embeddings
                 assert len(mm_tensor_handle) == 1, "Only one embedding is supported"
                 handle = mm_tensor_handle[0]
