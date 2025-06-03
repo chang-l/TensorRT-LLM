@@ -237,7 +237,6 @@ class TorchDist(Distributed):
         else:
             pass
 
-
 class PPComm:
     # PP communication using torch.distributed with nccl backend
     def __init__(self, global_mapping: Mapping):
@@ -279,3 +278,12 @@ class PPComm:
         if src is None:
             src = self.mapping.prev_pp_rank()
         dist.recv(tensor, src, tag=tag)
+
+class MMEmbeddingComm(PPComm):
+    # To reuse PP communication using torch.distributed with nccl backend
+    def __init__(self, global_mapping: Mapping):
+        # TODO: use global mapping to broadcast to all ranks
+        super().__init__(global_mapping)
+
+    def broadcast(self, tensor: torch.Tensor, root=0):
+        dist.broadcast(tensor, src=root)

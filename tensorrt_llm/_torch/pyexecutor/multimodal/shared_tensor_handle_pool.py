@@ -21,14 +21,14 @@ class SharedTensorPool:
     """
 
     def __init__(self, max_handles: int = 5, cleanup_timeout: float = 10.0):
-        self.active_handles: OrderedDict = OrderedDict()
+        self.active_handles: OrderedDict[Any, torch.Tensor] = OrderedDict()
         self.max_handles = max_handles
         self.cleanup_timeout = cleanup_timeout
-        self._lock = mp.Lock()
-
-        # Setup cleanup process and make sure to use spawn subprocess for CUDA compatibility
-        self.cleanup_queue = mp.Queue()
-        self.cleanup_process = mp.Process(target=self._cleanup_worker, daemon=True)
+        # TODO: This is problematic, as it will cause the new spawn process to inherit mpi context
+        ctx = mp.get_context('spawn')
+        self._lock = ctx.Lock()
+        self.cleanup_queue = ctx.Queue()
+        self.cleanup_process = ctx.Process(target=self._cleanup_worker, daemon=True)
         self.cleanup_process.start()
 
         # Verify cleanup process is running
@@ -54,7 +54,6 @@ class SharedTensorPool:
                     task = self.cleanup_queue.get_nowait()
                     if task == "STOP":
                         torch.cuda.ipc_collect()
-                        torch.cuda.empty_cache()
                         return  # Exit immediately on STOP signal
                     elif task == "CLEANUP":
                         torch.cuda.ipc_collect()
