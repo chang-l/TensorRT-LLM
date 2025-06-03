@@ -15,7 +15,7 @@ import queue
 import threading
 from tensorrt_llm.executor.multimodal import MultimodalRequest, MultimodalResponse
 from ..llm_request import ExecutorResponse
-from tensorrt_llm.executor.multimodal import SharedCUDATensorSerializer
+from tensorrt_llm._torch.multimodal import SharedTensorContainer
 from torchvision.transforms import ToTensor
 logger = logging.getLogger(__name__)
 
@@ -205,8 +205,8 @@ class MMExecutor(PyExecutor):
                         if resp.cp_event is not None:
                             resp.cp_event.synchronize()
                         #resp.embedding_handle = bytes(ForkingPickler.dumps(resp.embeddings))
-                        resp.embedding_handle = SharedCUDATensorSerializer.serialize([("embeddings", resp.embeddings)]) # share this cuda tensor with other prcs
-
+                        #resp.embedding_handle = SharedCUDATensorSerializer.serialize([("embeddings", resp.embeddings)]) # share this cuda tensor with other prcs
+                        resp.embedding_handle = [SharedTensorContainer.from_tensor(resp.embeddings)]
                         resp.embeddings = None
                         resp.cp_event = None
 

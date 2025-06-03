@@ -89,6 +89,7 @@ def main():
 
     encoder = setup_encoder(args)
     from tensorrt_llm.executor.multimodal.request import MultimodalRequest, MultimodalItem
+    from tensorrt_llm._torch.multimodal.mm_utils import SharedTensorContainer
     items = [
         MultimodalItem(
             req_id=1,
@@ -114,15 +115,24 @@ def main():
     )
 
     mm_requests = [mm_request] * 20
-
+    import torch
+    import gc
     outputs = encoder.generate_from_mm_request(mm_requests)
     for output in outputs:
         #print(f"output: {output.multimodal_params.embeddings.device}")
         for i in range(output.multimodal_params.num_items):
             sta = output.multimodal_params.item_offsets[i]
             end = sta + output.multimodal_params.item_token_length[i]
-            mm_embedding = output.multimodal_params.embeddings
-            print(f"item {i} embedding: {mm_embedding}")
+            mm_embedding_dict = output.multimodal_params.embeddings[0]
+            #mm_embedding = SharedTensorContainer.from_dict(mm_embedding_dict).to_local_view()
+
+            #print(f"item {i} embedding: {mm_embedding[sta:end].reshape(1, -1)[:5]}")
+        del output.multimodal_params.embeddings
+        gc.collect()
+        print(f"deleting output embeddings")
+        torch.cuda.ipc_collect()
+        torch.cuda.empty_cache()
+
 
 if __name__ == "__main__":
     main()

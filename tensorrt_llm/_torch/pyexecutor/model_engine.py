@@ -50,7 +50,7 @@ from .layerwise_nvtx_marker import LayerwiseNvtxMarker
 from .resource_manager import (BaseResourceManager, KVCacheManager,
                                ResourceManager)
 from .scheduler import ScheduledRequests
-from torch.multiprocessing.reductions import rebuild_cuda_tensor
+from tensorrt_llm._torch.multimodal import SharedTensorContainer
 
 import base64
 
@@ -1064,35 +1064,10 @@ class PyTorchModelEngine(ModelEngine):
                 mm_tensor_handle = request.py_disagg_mm_params.embeddings
                 assert len(mm_tensor_handle) == 1, "Only one embedding is supported"
                 handle = mm_tensor_handle[0]
-                # Decode base64 strings back to bytes
-                storage_handle = base64.b64decode(handle['storage_handle'])
-                ref_counter_handle = base64.b64decode(handle['ref_counter_handle'])
-                event_handle = base64.b64decode(handle['event_handle'])
-
-                # Reconstruct the tensor
-                cuda_tensor_info = {
-                    "tensor_cls": torch.Tensor,
-                    "tensor_size": tuple(handle['tensor_size']),
-                    "tensor_stride": tuple(handle['tensor_stride']),
-                    "tensor_offset": handle['tensor_offset'],
-                    "storage_cls": torch.storage.TypedStorage,
-                    "dtype": eval(handle['dtype']),  # Convert string back to torch dtype
-                    "storage_device": handle['storage_device'],
-                    "storage_handle": storage_handle,
-                    "storage_size_bytes": handle['storage_size_bytes'],
-                    "storage_offset_bytes": handle['storage_offset_bytes'],
-                    "requires_grad": handle['requires_grad'],
-                    "ref_counter_handle": ref_counter_handle,
-                    "ref_counter_offset": handle['ref_counter_offset'],
-                    "event_handle": event_handle,
-                    "event_sync_required": handle['event_sync_required']
-                }
-
-                # Rebuild the tensor
-                reconstructed_tensor = rebuild_cuda_tensor(**cuda_tensor_info)
-                multimodal_embedding = torch.empty(reconstructed_tensor.shape, device='cuda')
-                multimodal_embedding.copy_(reconstructed_tensor)
-                tensor_pool.add_handle(str(request.py_request_id), reconstructed_tensor)
+                shared_tensor = SharedTensorContainer.from_dict(handle).to_local_view()
+                multimodal_embedding = torch.empty(shared_tensor.shape, device='cuda')
+                multimodal_embedding.copy_(shared_tensor)
+                tensor_pool.add_handle(str(request.py_request_id), shared_tensor)
                 multi_modal_data.append(multimodal_embedding)
 
             mrope_rotary_cos_sin = request.get_mrope_rotary_cos_sin()

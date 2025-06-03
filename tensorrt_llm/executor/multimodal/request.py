@@ -4,7 +4,6 @@ from typing import (Any, List, Optional, AsyncIterator)
 
 import torch
 
-from torch.multiprocessing.reductions import rebuild_cuda_tensor
 from typing import cast
 from tensorrt_llm.inputs.utils import load_image
 from tensorrt_llm.multimodal_params import MultimodalParams
@@ -12,7 +11,6 @@ from tensorrt_llm.multimodal_params import MultimodalParams
 __all__ = [
     "MultimodalRequest",
     "MultimodalResponse",
-    "SharedCUDATensorSerializer",
 ]
 
 # TODO: this should already be in the gh-main
@@ -308,6 +306,7 @@ class MultimodalResponse:
         """Set the response to final."""
         self._is_final = True
 
+    # TODO: this is a hack to make the result compatible with the proxy/worker architecture
     @property
     def result(self):
         """Return a result object compatible with the proxy/worker architecture."""
@@ -317,29 +316,11 @@ class MultimodalResponse:
         })
 
     def get_params(self):
-        import base64
-
         if self.embedding_handle:
             # Convert the serialized tensor info to a JSON-serializable format
             embeddings = []
             for tensor_info in self.embedding_handle:
-                # Convert tensor info to a basic dict with only serializable values
-                serializable_info = {
-                    "tensor_size": list(tensor_info["tensor_size"]),
-                    "tensor_stride": list(tensor_info["tensor_stride"]),
-                    "tensor_offset": tensor_info["tensor_offset"],
-                    "dtype": str(tensor_info["dtype"]),
-                    "storage_device": tensor_info["storage_device"],
-                    "storage_handle": base64.b64encode(tensor_info["storage_handle"]).decode('utf-8'),
-                    "storage_size_bytes": tensor_info["storage_size_bytes"],
-                    "storage_offset_bytes": tensor_info["storage_offset_bytes"],
-                    "requires_grad": tensor_info["requires_grad"],
-                    "ref_counter_handle": base64.b64encode(tensor_info["ref_counter_handle"]).decode('utf-8'),
-                    "ref_counter_offset": tensor_info["ref_counter_offset"],
-                    "event_handle": base64.b64encode(tensor_info["event_handle"]).decode('utf-8'),
-                    "event_sync_required": tensor_info["event_sync_required"]
-                }
-                embeddings.append(serializable_info)
+                embeddings.append(tensor_info.to_dict())
         else:
             embeddings = None
 
@@ -349,53 +330,4 @@ class MultimodalResponse:
             num_items=self.num_items,
             item_offsets=self.item_offsets,
             item_token_length=self.item_token_length)
-
-
-class SharedCUDATensorSerializer:
-    @staticmethod
-    def serialize(obj):
-        assert isinstance(obj, list)
-        serialized = []
-        for name, tensor in obj:
-            _storage = tensor._typed_storage()
-            assert _storage.device.type == "cuda", "SharedCUDATensorSerializer only supports cuda tensors"
-            (
-                storage_device,
-                storage_handle,
-                storage_size_bytes,
-                storage_offset_bytes,
-                ref_counter_handle,
-                ref_counter_offset,
-                event_handle,
-                event_sync_required,
-            ) = _storage._share_cuda_()
-            cuda_tensor_info = {
-                "name": name,
-                "tensor_cls": type(tensor),
-                "tensor_size": tensor.shape,
-                "tensor_stride": tensor.stride(),
-                "tensor_offset": tensor.storage_offset(),
-                "storage_cls": type(_storage),
-                "dtype": tensor.dtype,
-                "storage_device": storage_device,
-                "storage_handle": storage_handle,
-                "storage_size_bytes": storage_size_bytes,
-                "storage_offset_bytes": storage_offset_bytes,
-                "requires_grad": tensor.requires_grad,
-                "ref_counter_handle": ref_counter_handle,
-                "ref_counter_offset": ref_counter_offset,
-                "event_handle": event_handle,
-                "event_sync_required": event_sync_required,
-            }
-            serialized.append(cuda_tensor_info)
-        return serialized
-
-    @staticmethod
-    def deserialize(data):
-        deserialized = []
-        for serialized in data:
-            name = serialized.pop("name")
-            rebuilt_tensor = rebuild_cuda_tensor(**serialized)
-            deserialized.append((name, rebuilt_tensor))
-        return deserialized
 
