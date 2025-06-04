@@ -5,7 +5,7 @@ import time
 import signal
 import logging
 from queue import Empty
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class SharedTensorPool:
         cleanup_timeout (float): Timeout in seconds for cleanup process operations.
     """
 
-    def __init__(self, max_handles: int = 5, cleanup_timeout: float = 10.0):
+    def __init__(self, max_handles: int = 10, cleanup_timeout: float = 10.0):
         self.active_handles: OrderedDict[Any, torch.Tensor] = OrderedDict()
         self.max_handles = max_handles
         self.cleanup_timeout = cleanup_timeout
@@ -141,10 +141,40 @@ class SharedTensorPool:
         if self.cleanup_process.is_alive():
             logger.warning("Cleanup process did not terminate within timeout")
 
+class SharedTensorBuffer_NoCleanup:
+    """A buffer for managing shared CUDA tensor reference.
+    """
+
+    def __init__(self, max_handles: int = 10):
+        self.active_handles: OrderedDict[Any, torch.Tensor] = OrderedDict()
+        self.max_handles = max_handles
+
+    def _remove_handle(self, key: str) -> None:
+        """Internal method to remove a handle without acquiring lock.
+
+        Args:
+            key: Identifier of the handle to remove
+        """
+        if key in self.active_handles:
+            del self.active_handles[key]
+
+
+    def add_handle(self, key: str, tensor_info: Any) -> None:
+        """Add a new tensor handle to the pool.
+
+        Args:
+            key: Unique identifier for the handle
+            tensor_info: Information about the tensor to be stored
+        """
+        if len(self.active_handles) >= self.max_handles:
+            oldest_key = next(iter(self.active_handles))
+            self._remove_handle(oldest_key)  # Use internal method instead
+        self.active_handles[key] = tensor_info
+
 # Global pool instance
 _tensor_pool = None
 
-def get_tensor_pool():
+def get_tensor_pool(async_ipc_release: bool = False):
     """Get or create the global tensor pool instance.
 
     This function ensures the tensor pool is created only when needed and after
@@ -152,5 +182,8 @@ def get_tensor_pool():
     """
     global _tensor_pool
     if _tensor_pool is None:
-        _tensor_pool = SharedTensorPool()
+        if async_ipc_release:
+            _tensor_pool = SharedTensorPool()
+        else:
+            _tensor_pool = SharedTensorBuffer_NoCleanup()
     return _tensor_pool

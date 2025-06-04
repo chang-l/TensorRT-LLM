@@ -6,18 +6,42 @@ import torch
 from PIL import Image
 from torchvision.transforms import ToTensor
 from transformers import AutoProcessor
+from urllib.parse import urlparse
+import base64
+from io import BytesIO
 
+def _load_and_convert_image(image):
+    image = Image.open(image)
+    image.load()
+    return image.convert("RGB")
+
+def load_base64_image(parsed_url: str) -> Image.Image:
+    data_spec, data = parsed_url.path.split(",", 1)
+    media_type, data_type = data_spec.split(";", 1)
+
+    if data_type != "base64":
+        msg = "Only base64 data URLs are supported for now."
+        raise NotImplementedError(msg)
+
+    content = base64.b64decode(data)
+    image = _load_and_convert_image(BytesIO(content))
+    return image
 
 def load_image(image: str,
                format: str = "pt",
                device: str = "cuda") -> Union[Image.Image, torch.Tensor]:
     assert format in ["pt", "pil"], "format must be either Pytorch or PIL"
 
-    if image.startswith("http://") or image.startswith("https://"):
-        image = Image.open(requests.get(image, stream=True, timeout=10).raw)
+    parsed_url = urlparse(image)
+
+    if parsed_url.scheme in ["http", "https"]:
+        image = requests.get(image, stream=True, timeout=10).raw
+        image = _load_and_convert_image(image)
+    elif parsed_url.scheme == "data":
+        image = load_base64_image(parsed_url)
     else:
-        image = Image.open(image)
-    image = image.convert("RGB")
+        image = _load_and_convert_image(image)
+
     if format == "pt":
         return ToTensor()(image).to(device=device)
     else:

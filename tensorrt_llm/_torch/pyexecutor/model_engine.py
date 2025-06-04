@@ -1072,8 +1072,8 @@ class PyTorchModelEngine(ModelEngine):
                     shared_tensor = SharedTensorContainer.from_dict(mm_tensor_handle).to_local_view()
                     # TODO: Add to tensor pool to prevent immediate cuda close ipc handle call, which will introduces cpu overhead
                     # TODO: Potential issue: in SharedTensorPool, we cannot spawn the new background process to handle the ipc close call
-                    #tensor_pool = get_tensor_pool()
-                    #tensor_pool.add_handle(str(request.py_request_id), shared_tensor)
+                    tensor_pool = get_tensor_pool(async_ipc_release=False)
+                    tensor_pool.add_handle(str(request.py_request_id), shared_tensor)
                     multimodal_embedding.copy_(shared_tensor)
                     self.mm_emb_dist.broadcast(multimodal_embedding)
                 else:
