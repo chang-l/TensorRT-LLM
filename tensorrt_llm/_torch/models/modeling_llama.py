@@ -830,7 +830,8 @@ class Llama4InputProcessor(InputProcessor):
 
         Args:
             inputs: Text prompt containing image placeholders
-            multimodal_embedding: Dictionary containing image embedding data with special token information
+            multimodal_embedding: Dictionary containing image embedding data with special token information.
+                                  Consider adding metadata fields (e.g., model_type, model_name, version) for validation.
 
         Returns:
             Tuple of (token_ids, extra_processed_inputs) where:
@@ -906,14 +907,18 @@ class Llama4InputProcessor(InputProcessor):
 
         # Combine all parts and tokenize
         processed_text = "".join(new_prompt_parts)
-        text_inputs = self.tokenizer(processed_text, return_tensors="pt", add_special_tokens=False)
+        # TODO: pass sampling_params.add_special_tokens to tokenizer
+        text_inputs = self.tokenizer(processed_text, return_tensors="pt", add_special_tokens=True)
         token_ids = text_inputs.input_ids.squeeze()
 
         # Replace image token indices with out-of-vocabulary tokens
         token_ids[token_ids == self.image_token_index] = self.vocab_size + 1
         # Concatenate all multimodal embeddings
         mm_embeds = torch.cat(mm_embeddings, dim=0)
-        return token_ids.tolist(), {"mm_embedding": mm_embeds}
+
+        multimodal_data = {}
+        multimodal_data["multimodal_embedding"] = mm_embeds
+        return token_ids.tolist(), {"multimodal_data": multimodal_data}
 
     @torch.inference_mode()
     def __call__(
