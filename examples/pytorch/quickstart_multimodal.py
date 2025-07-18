@@ -86,6 +86,11 @@ def main():
     assert model_type in ALL_SUPPORTED_MULTIMODAL_MODELS, f"Unsupported model_type: {model_type}"
 
     device = "cuda"
+    import torch
+    mm_embeds_1 = torch.load("maverick_mm_embed_seashore_v3.pt")
+    mm_embeds_2 = torch.load("maverick_mm_embed_inpaint_v3.pt")
+    mm_embeds_3 = torch.load("maverick_mm_embed_highway_61_v3.pt")
+    mm_embeds = [mm_embeds_1, mm_embeds_2, mm_embeds_3]
     inputs = default_multimodal_input_loader(tokenizer=llm.tokenizer,
                                              model_dir=llm._hf_model_dir,
                                              model_type=model_type,
@@ -94,6 +99,7 @@ def main():
                                              media=args.media,
                                              image_data_format=image_format,
                                              num_frames=args.num_frames,
+                                             mm_embeddings=mm_embeds,
                                              device=device)
 
     outputs = llm.generate(inputs, sampling_params)
