@@ -96,7 +96,7 @@ def main():
                                              model_type=model_type,
                                              modality=args.modality,
                                              prompts=args.prompt,
-                                             media=args.media,
+                                             media=None, #args.media,
                                              image_data_format=image_format,
                                              num_frames=args.num_frames,
                                              mm_embeddings=mm_embeds,
