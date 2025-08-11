@@ -13,6 +13,7 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 import torch
 from cuda import cudart
 
+from tensorrt_llm._torch.models.modeling_qwen import Qwen2ForCausalLM
 from tensorrt_llm._torch.pyexecutor.resource_manager import ResourceManagerType
 from tensorrt_llm._torch.pyexecutor.seq_slot_manager import SeqSlotManager
 from tensorrt_llm._utils import (customized_gc_thresholds, global_mpi_rank,
@@ -1116,6 +1117,10 @@ class PyExecutor:
             #        of DecoderModelForCausalLM reused by Qwen2ForProcessRewardModel
             #        should be factored out into a separate class instead.
             if not hasattr(self.model_engine.model, "lm_head"):
+                return
+
+            if isinstance(self.model_engine.model, Qwen2ForCausalLM):
+                # TODO: This is a WAR for the request of using Qwen2 (non-vision) model to process multimodal embedding directly
                 return
 
             if not request.check_token_id_range(

@@ -154,6 +154,9 @@ def fuse_input_embeds(
             "cause token count mismatches within the inference batch.")
 
     text_embed = embedding_layer(input_ids[text_token_indices])
+    if len(text_embed) == 0:
+        return None, mm_embed
+
     input_embeds = torch.empty(input_ids.shape[0],
                                mm_embed.shape[-1],
                                device=text_embed.device,

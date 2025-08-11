@@ -4,8 +4,7 @@ import os
 
 from quickstart_advanced import add_llm_args, setup_llm
 
-from tensorrt_llm.inputs import (ALL_SUPPORTED_MULTIMODAL_MODELS,
-                                 default_multimodal_input_loader)
+from tensorrt_llm.inputs import ALL_SUPPORTED_MULTIMODAL_MODELS
 
 example_medias_and_prompts = {
     "image": {
@@ -154,34 +153,47 @@ def main():
 
     llm, sampling_params = setup_llm(args, lora_config=lora_config)
 
-    image_format = args.image_format
+    args.image_format
     if args.model_type is not None:
         model_type = args.model_type
     else:
         model_type = json.load(
             open(os.path.join(llm._hf_model_dir, 'config.json')))['model_type']
-    assert model_type in ALL_SUPPORTED_MULTIMODAL_MODELS, f"Unsupported model_type: {model_type}"
+    #assert model_type in ALL_SUPPORTED_MULTIMODAL_MODELS, f"Unsupported model_type: {model_type}"
 
     # set prompts and media to example prompts and images if they are not provided
     if args.prompt is None:
         args.prompt = example_medias_and_prompts[args.modality]["prompt"]
     if args.media is None:
         args.media = example_medias_and_prompts[args.modality]["media"]
-    inputs = default_multimodal_input_loader(tokenizer=llm.tokenizer,
-                                             model_dir=llm._hf_model_dir,
-                                             model_type=model_type,
-                                             modality=args.modality,
-                                             prompts=args.prompt,
-                                             media=args.media,
-                                             image_data_format=image_format,
-                                             num_frames=args.num_frames,
-                                             device=args.device)
+
+    import torch
+    mm_embeddings = torch.load("pt_files/driveos_input_sample_qwen.pt")
+    inputs = [
+        {
+            "prompt": "",
+            "multi_modal_embeddings": {
+                "image": [mm_embeddings],
+            },
+        }
+    ]  # Format: [PrompInput] where PromptInput: {"prompt": "/empty string/", "multi_modal_embeddings": {"image": [embed_tensor]}}
+
+    #inputs = default_multimodal_input_loader(tokenizer=llm.tokenizer,
+    #                                         model_dir=llm._hf_model_dir,
+    #                                         model_type=model_type,
+    #                                         modality=args.modality,
+    #                                         prompts=[],#args.prompt,
+    #                                         media=args.media,
+    #                                         mm_embeddings=[mm_embeddings],
+    #                                         image_data_format=image_format,
+    #                                         num_frames=args.num_frames,
+    #                                         device=args.device)
 
     lora_request = None
     if args.load_lora:
         lora_request = model_class.lora_request(len(inputs), args.modality,
                                                 llm._hf_model_dir)
-
+    sampling_params.max_tokens = 6
     outputs = llm.generate(
         inputs,
         sampling_params,
@@ -189,9 +201,9 @@ def main():
     )
 
     for i, output in enumerate(outputs):
-        prompt = args.prompt[i]
-        generated_text = output.outputs[0].text
-        print(f"[{i}] Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        args.prompt[i]
+        output.outputs[0].text
+        print(f"output token ids:  {output.outputs[0].token_ids}")
 
 
 if __name__ == "__main__":

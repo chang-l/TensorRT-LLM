@@ -15,6 +15,7 @@ from ..modules.embedding import Embedding
 from ..modules.gated_mlp import GatedMLP
 from ..modules.linear import Linear, TensorParallelMode
 from ..modules.rms_norm import RMSNorm
+from .modeling_multimodal_utils import fuse_input_embeds
 from .modeling_utils import (DecoderModel, DecoderModelForCausalLM,
                              register_auto_model)
 
@@ -191,6 +192,18 @@ class Qwen2ForCausalLM(DecoderModelForCausalLM[QwenModel, Qwen2Config]):
         mrope_config: Optional[dict] = None,
         **kwargs,
     ) -> torch.Tensor:
+        """
+        VLM forward logic with inflight batching support.
+        """
+        multimodal_params = kwargs.get("multimodal_params", [])
+        mm_embeds = []
+        if len(multimodal_params) > 0:
+            mm_embeds = [
+                multimodal_param.multimodal_data["multimodal_embedding"]
+                for multimodal_param in multimodal_params
+            ]
+        input_ids, inputs_embeds = fuse_input_embeds(self.model.embed_tokens,
+                                                     input_ids, mm_embeds)
         output = self.model(
             input_ids=input_ids,
             attn_metadata=attn_metadata,

@@ -1,6 +1,7 @@
 from typing import (Any, Callable, Dict, List, Optional, Protocol, Tuple, Type,
                     TypeVar)
 
+import torch
 from torch import nn
 
 from .._utils import nvtx_range_debug
@@ -50,6 +51,36 @@ class DefaultInputProcessor(InputProcessor):
         self.tokenizer = tokenizer
         self.model_config = model_config
         self.model_path = model_path
+
+    def attach_multimodal_embeddings(
+        self, inputs: TextPrompt, mm_embedding_info: Dict[str, Any],
+        sampling_params: SamplingParams
+    ) -> Tuple[List[int], Optional[ExtraProcessedInputs]]:
+        assert 'image' in mm_embedding_info, "only image modality is supported"
+        logger.warning("Discard the input text prompt for now.")
+        mm_embedding_info = mm_embedding_info['image']
+        mm_embeddings = [mm_embedding for mm_embedding in mm_embedding_info]
+        for i, embedding in enumerate(mm_embeddings):
+            if embedding.shape[-1] != self.model_config.hidden_size:
+                raise ValueError(
+                    f"Multimodal embedding {i} hidden size {embedding.shape[-1]} "
+                    f"must match model hidden size {self.model_config.hidden_size}"
+                )
+            mm_embeddings[i] = embedding.view(-1, self.model_config.hidden_size)
+            assert mm_embeddings[i].dim(
+            ) == 2, "the embedding table needs to be 2-dim tensor"
+
+        mm_embedding = torch.cat(mm_embeddings, dim=0)
+        num_emb = mm_embedding.shape[0]
+        token_ids = [
+            self.model_config.vocab_size + 1
+        ] * num_emb  # TODO: this is hard coded and should be dummy values
+        multimodal_data = {}
+
+        multimodal_data["multimodal_embedding"] = mm_embedding.to(
+            self.model_config.torch_dtype
+        )  # TODO: this should not be necessary if model and embedding are consistent..
+        return token_ids, {"multimodal_data": multimodal_data}
 
     def __call__(
         self, inputs: TextPrompt, sampling_params: SamplingParams
@@ -145,7 +176,7 @@ def create_input_processor(model_path_or_dir: str, tokenizer):
                                        tokenizer,
                                        trust_remote_code=True)
 
-    return DefaultInputProcessor(None, None, tokenizer)
+    return DefaultInputProcessor(None, model_config, tokenizer)
 
 
 def create_input_processor_with_hash(
