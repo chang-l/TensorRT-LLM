@@ -7,7 +7,6 @@ import torch.nn as nn
 
 import tensorrt_llm
 import tensorrt_llm.bindings
-import tensorrt_llm.quantization.utils.fp8_utils as fp8_utils
 from tensorrt_llm._torch.attention_backend.interface import (
     MLAParams, PositionalEmbeddingParams)
 from tensorrt_llm._torch.attention_backend.trtllm import (
@@ -27,7 +26,8 @@ from tensorrt_llm.bindings.executor import KvCacheConfig
 from tensorrt_llm.bindings.internal.batch_manager import \
     CacheType as CacheTypeCpp
 from tensorrt_llm.deep_gemm import (fp8_mqa_logits, fp8_paged_mqa_logits,
-                                    get_paged_mqa_logits_metadata)
+                                    get_paged_mqa_logits_metadata,
+                                    transform_sf_into_required_layout)
 from tensorrt_llm.llmapi.llm_args import SparseAttentionConfig
 from tensorrt_llm.logger import logger
 from tensorrt_llm.mapping import Mapping
@@ -1068,7 +1068,7 @@ class Indexer(nn.Module):
     def forward(self, qr: torch.Tensor, hidden_states: torch.Tensor,
                 metadata: DSAtrtllmAttentionMetadata,
                 position_ids: torch.Tensor):
-        quant_block_size = metadata.kv_cache_manager.quant_block_size
+        metadata.kv_cache_manager.quant_block_size
 
         q, k = maybe_execute_in_parallel(
             lambda: self.wq_b(qr),
@@ -1099,8 +1099,21 @@ class Indexer(nn.Module):
         )
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
-        q_fp8, q_scale = fp8_utils.per_token_quant_and_transform(
-            q, quant_block_size, scale_ue8m0=self.scale_fmt == "ue8m0")
+        q_fp8, q_scale = torch.ops.trtllm.fp8_quantize_1x128(
+            q, use_ue8m0=self.scale_fmt == "ue8m0")
+        if q_scale.ndim == 1:
+            num_blocks = (q.shape[1] + 127) // 128
+            m_padded = (q.shape[0] + 3) // 4 * 4
+            q_scale = q_scale[:num_blocks * m_padded].view(
+                num_blocks,
+                m_padded)[:, :q.shape[0]]  # this is non-contiguous on sm90
+        q_scale = transform_sf_into_required_layout(sf=q_scale.t().contiguous(),
+                                                    mn=q.shape[0],
+                                                    k=q.shape[1],
+                                                    recipe=(1, 1, 128),
+                                                    num_groups=None,
+                                                    is_sfa=False)
+
         q_fp8 = q_fp8.view(-1, self.n_heads, self.head_dim)
         q_scale = q_scale.view(-1, self.n_heads, 1)
 
