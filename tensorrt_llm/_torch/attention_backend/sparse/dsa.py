@@ -972,7 +972,7 @@ class Indexer(nn.Module):
                 and host_cached_tokens.sum().item() > 0
                 and metadata.runtime_features.chunked_prefill)
 
-            if has_mla_chunked_prefill:
+            if has_mla_chunked_prefill or metadata.kv_cache_manager.enable_block_reuse:
                 # MLA chunked prefill mode: prepare single indexer chunk for current MLA chunk
                 # The MLA has already split the sequence, we just process what's given
                 chunk_specs = [(i, 0, host_seq_lens[i].item(),
@@ -1009,7 +1009,7 @@ class Indexer(nn.Module):
 
             # Compute causal attention bounds accounting for cached KV tokens
             # For chunked prefill: Q has new tokens, K has cached + new tokens
-            if has_mla_chunked_prefill:
+            if has_mla_chunked_prefill or metadata.kv_cache_manager.enable_block_reuse:
                 # Chunked prefill mode: adjust bounds for cached KV
                 host_cu_seqlen_ks, host_cu_seqlen_ke = compute_cu_seqlen_kv_bounds_with_cache(
                     host_seq_lens, host_cached_tokens, num_contexts,
@@ -1639,10 +1639,6 @@ class DSACacheManager(KVCacheManager):
         sparse_attn_config: "SparseAttentionConfig",
         **kwargs,
     ) -> None:
-
-        if kv_cache_config.enable_block_reuse:
-            raise NotImplementedError(
-                "DSA indexer K-cache manager does not support block reuse yet")
         self.quant_block_size = 128
         self.index_head_dim = sparse_attn_config.index_head_dim
         # Use a fixed tokens_per_block for indexer k cache due to DG kernel constraints
