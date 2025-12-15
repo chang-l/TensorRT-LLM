@@ -18,12 +18,11 @@ from tensorrt_llm.llmapi.llm_args import (CapacitySchedulerPolicy,
                                           ContextChunkingPolicy,
                                           GuidedDecodingConfig, LoadFormat,
                                           TorchLlmArgs)
-from tensorrt_llm.llmapi.tokenizer import (TokenizerBase,
-                                           _llguidance_tokenizer_info,
-                                           _xgrammar_tokenizer_info)
 from tensorrt_llm.logger import logger
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.quantization import QuantAlgo
+from tensorrt_llm.tokenizer import (TokenizerBase, _llguidance_tokenizer_info,
+                                    _xgrammar_tokenizer_info)
 
 from ..attention_backend.interface import AttentionRuntimeFeatures
 from ..attention_backend.trtllm import TrtllmAttention

@@ -16,7 +16,7 @@ from torch import from_numpy
 from torch.utils.dlpack import from_dlpack
 
 import tensorrt_llm.bindings.executor as trtllm
-from tensorrt_llm.llmapi.tokenizer import _xgrammar_tokenizer_info
+from tensorrt_llm.tokenizer import _xgrammar_tokenizer_info
 
 METRIC_TOTAL_OUTPUT_TOKENS = "total_output_tokens"
 METRIC_TOTAL_INPUT_TOKENS = "total_input_tokens"

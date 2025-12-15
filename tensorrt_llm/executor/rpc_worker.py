@@ -12,9 +12,9 @@ from .._utils import mpi_rank
 from ..bindings import executor as tllm
 from ..builder import Engine
 from ..llmapi.llm_args import BaseLlmArgs
-from ..llmapi.tokenizer import TokenizerBase
 from ..logger import set_level
 from ..sampling_params import BatchedLogitsProcessor
+from ..tokenizer import TokenizerBase
 from .base_worker import BaseWorker
 from .postproc_worker import PostprocWorkerConfig
 from .rpc import RPCServer

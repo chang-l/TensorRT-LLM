@@ -16,11 +16,11 @@ from ..bindings import executor as tllm
 from ..builder import Engine
 from ..llmapi.llm_args import BaseLlmArgs
 from ..llmapi.mpi_session import set_mpi_session_cpp
-from ..llmapi.tokenizer import TokenizerBase
 from ..llmapi.tracer import VizTracer, set_global_tracer
 from ..llmapi.utils import (AsyncQueue, ManagedThread, _SyncQueue, logger_debug,
                             print_traceback_on_error)
 from ..sampling_params import BatchedLogitsProcessor
+from ..tokenizer import TokenizerBase
 from .base_worker import BaseWorker, _init_hf_modules
 from .executor import IterationResultQueue
 from .ipc import FusedIpcQueue, IpcQueue

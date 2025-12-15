@@ -7,7 +7,7 @@ methods:
         default: inspect._empty
       tokenizer:
         annotation: Union[str, pathlib.Path, transformers.tokenization_utils_base.PreTrainedTokenizerBase,
-          tensorrt_llm.llmapi.tokenizer.TokenizerBase, NoneType]
+          tensorrt_llm.tokenizer.TokenizerBase, NoneType]
         default: null
       tokenizer_mode:
         annotation: Literal['auto', 'slow', 'deepseek_v32']
@@ -140,5 +140,5 @@ methods:
     return_annotation: tensorrt_llm.llmapi.llm.RequestOutput
 properties:
   tokenizer:
-    annotation: Optional[tensorrt_llm.llmapi.tokenizer.TokenizerBase]
+    annotation: Optional[tensorrt_llm.tokenizer.TokenizerBase]
     default: inspect._empty

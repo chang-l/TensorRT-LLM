@@ -38,7 +38,7 @@ from tensorrt_llm.llmapi.llm_args import (
     SpeculativeConfig,
     TorchLlmArgs,
 )
-from tensorrt_llm.llmapi.tokenizer import TokenizerBase
+from tensorrt_llm.tokenizer import TokenizerBase
 
 from ...._utils import mpi_rank, mpi_world_size
 from ....bindings.internal.batch_manager import CacheType

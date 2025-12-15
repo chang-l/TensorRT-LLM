@@ -92,7 +92,7 @@ tokenizer_str = tokenizer.backend_tokenizer.to_str()
 stop_token_ids = [tokenizer.eos_token_id]
 ```
 
-Refer to [`tensorrt_llm/llmapi/tokenizer.py`](source:tensorrt_llm/llmapi/tokenizer.py) for more details. You may dump these materials to disk, and reload them to C++ runtime for use.
+Refer to [`tensorrt_llm/tokenizer/tokenizer.py`](source:tensorrt_llm/tokenizer/tokenizer.py) for more details. You may dump these materials to disk, and reload them to C++ runtime for use.
 
 Each request can be optionally specified with a `GuidedDecodingParams`, which defines the desired structured format. Currently, it supports four types:
 * `GuidedDecodingParams::GuideType::kJSON`: The generated text is amenable to JSON format;
