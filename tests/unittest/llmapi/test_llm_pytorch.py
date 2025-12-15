@@ -11,9 +11,9 @@ from tensorrt_llm.executor import GenerationExecutorWorker
 from tensorrt_llm.executor.rpc_proxy import GenerationExecutorRpcProxy
 from tensorrt_llm.llmapi import CacheTransceiverConfig, KvCacheConfig
 from tensorrt_llm.llmapi.llm_args import NGramDecodingConfig, PeftCacheConfig
-from tensorrt_llm.llmapi.tokenizer import TransformersTokenizer
 from tensorrt_llm.metrics import MetricNames
 from tensorrt_llm.sampling_params import SamplingParams
+from tensorrt_llm.tokenizer import TransformersTokenizer
 
 # isort: off
 from .lora_test_utils import (

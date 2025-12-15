@@ -21,7 +21,7 @@ from pathlib import Path
 
 from transformers import AutoTokenizer
 
-from tensorrt_llm.llmapi.tokenizer import _xgrammar_tokenizer_info
+from tensorrt_llm.tokenizer import _xgrammar_tokenizer_info
 
 
 def generate_xgrammar_tokenizer_info(args):

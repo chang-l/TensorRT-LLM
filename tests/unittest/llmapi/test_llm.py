@@ -40,14 +40,14 @@ from tensorrt_llm.llmapi.llm_args import (DynamicBatchConfig, PeftCacheConfig,
                                           SchedulerConfig)
 from tensorrt_llm.llmapi.llm_utils import (BuildConfig, QuantAlgo, QuantConfig,
                                            _ParallelConfig)
-from tensorrt_llm.llmapi.tokenizer import (TokenizerBase, TransformersTokenizer,
-                                           load_hf_tokenizer)
 from tensorrt_llm.llmapi.utils import get_total_gpu_memory
 from tensorrt_llm.lora_helper import LoraConfig
 from tensorrt_llm.models.automodel import AutoConfig, AutoModelForCausalLM
 from tensorrt_llm.models.modeling_utils import SpeculativeDecodingMode
 from tensorrt_llm.sampling_params import (BatchedLogitsProcessor,
                                           LogitsProcessor, SamplingParams)
+from tensorrt_llm.tokenizer import (TokenizerBase, TransformersTokenizer,
+                                    load_hf_tokenizer)
 
 # isort: off
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
@@ -389,10 +389,10 @@ def test_llm_with_kv_cache_retention_config():
 def test_tokenizer_decode_incrementally(tokenizer_dir: str,
                                         clean_up_tokenization_spaces: bool,
                                         threshold: float, backend: str, mocker):
-    import tensorrt_llm.llmapi.tokenizer
-    mocker.patch.object(tensorrt_llm.llmapi.tokenizer,
+    import tensorrt_llm.tokenizer
+    mocker.patch.object(tensorrt_llm.tokenizer,
                         "TLLM_INCREMENTAL_DETOKENIZATION_BACKEND", backend)
-    assert tensorrt_llm.llmapi.tokenizer.TLLM_INCREMENTAL_DETOKENIZATION_BACKEND == backend
+    assert tensorrt_llm.tokenizer.TLLM_INCREMENTAL_DETOKENIZATION_BACKEND == backend
 
     random.seed(42)
 

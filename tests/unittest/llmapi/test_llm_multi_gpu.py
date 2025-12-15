@@ -11,11 +11,11 @@ from parameterized import parameterized
 from tensorrt_llm._tensorrt_engine import LLM
 from tensorrt_llm.executor import GenerationExecutorProxy
 from tensorrt_llm.llmapi import BuildConfig, KvCacheConfig, SamplingParams
-from tensorrt_llm.llmapi.tokenizer import TransformersTokenizer
 from tensorrt_llm.lora_helper import LoraConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models import PretrainedConfig
 from tensorrt_llm.models.llama.model import LLaMAForCausalLM
+from tensorrt_llm.tokenizer import TransformersTokenizer
 
 # isort: off
 from .lora_test_utils import check_llama_7b_multi_lora_from_request_test_harness

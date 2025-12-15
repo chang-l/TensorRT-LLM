@@ -46,7 +46,6 @@ from tensorrt_llm.llmapi import SamplingParams
 from tensorrt_llm.llmapi.llm import RequestOutput
 from tensorrt_llm.llmapi.reasoning_parser import (BaseReasoningParser,
                                                   ReasoningParserFactory)
-from tensorrt_llm.llmapi.tokenizer import TokenizerBase, TransformersTokenizer
 from tensorrt_llm.logger import logger
 from tensorrt_llm.serve.chat_utils import parse_chat_messages_coroutines
 from tensorrt_llm.serve.openai_protocol import (ChatCompletionMessageParam,
@@ -63,6 +62,7 @@ from tensorrt_llm.serve.openai_protocol import (ChatCompletionMessageParam,
 from tensorrt_llm.serve.tool_parser.base_tool_parser import BaseToolParser
 from tensorrt_llm.serve.tool_parser.core_types import ToolCallItem
 from tensorrt_llm.serve.tool_parser.tool_parser_factory import ToolParserFactory
+from tensorrt_llm.tokenizer import TokenizerBase, TransformersTokenizer
 
 from .harmony_adapter import HarmonyAdapter, get_harmony_adapter
 

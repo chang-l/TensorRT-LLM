@@ -6,8 +6,8 @@ import torch
 from ...executor.result import CompletionOutput
 from ...inputs.registry import DefaultInputProcessor, ExtraProcessedInputs
 from ...llmapi.llm import RequestOutput, _TorchLLM
-from ...llmapi.tokenizer import TokenizerBase, TransformersTokenizer, tokenizer_factory
 from ...sampling_params import SamplingParams
+from ...tokenizer import TokenizerBase, TransformersTokenizer, tokenizer_factory
 from .distributed import common as dist_ad
 from .llm_args import LlmArgs
 from .models.factory import ModelFactory

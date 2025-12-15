@@ -9,9 +9,9 @@ import zmq
 
 from .._utils import nvtx_range_debug
 from ..bindings import executor as tllm
-from ..llmapi.tokenizer import TransformersTokenizer, load_hf_tokenizer
 from ..llmapi.utils import print_traceback_on_error
 from ..sampling_params import SamplingParams
+from ..tokenizer import TransformersTokenizer, load_hf_tokenizer
 from .ipc import ZeroMqQueue
 from .utils import is_llm_response
 

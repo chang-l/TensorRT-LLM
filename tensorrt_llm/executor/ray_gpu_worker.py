@@ -16,8 +16,8 @@ from tensorrt_llm._torch.virtual_memory import (materialize_with_tag,
 from ..bindings import executor as tllm
 from ..builder import Engine
 from ..llmapi.llm_args import BaseLlmArgs
-from ..llmapi.tokenizer import TokenizerBase
 from ..sampling_params import BatchedLogitsProcessor
+from ..tokenizer import TokenizerBase
 from .base_worker import BaseWorker
 from .postproc_worker import PostprocWorkerConfig
 from .request import GenerationRequest
