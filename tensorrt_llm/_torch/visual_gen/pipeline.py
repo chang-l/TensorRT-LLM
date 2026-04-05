@@ -47,17 +47,23 @@ class BasePipeline(nn.Module):
         # CUDA graph runner - wrap transformer.forward
         # Order matters: TeaCache will wrap on top of it and still call the
         # graphed transformer.forward if should_compute == True.
-        self._setup_cuda_graphs()
+        # When torch.compile is enabled, CUDA graph setup is deferred to
+        # pipeline_loader after torch_compile() so that graphs capture the
+        # compiled model forward.  For the torch.compile-disabled path, set up
+        # here so that pipelines created outside the loader also benefit.
+        if not self.model_config.torch_compile.enable_torch_compile:
+            self._setup_cuda_graphs()
 
     def _setup_cuda_graphs(self):
-        """Wrap all transformer components with CUDA graph capture/replay."""
-        if not self.model_config.cuda_graph.enable_cuda_graph:
-            return
+        """Wrap all transformer components with CUDA graph capture/replay.
 
-        if self.model_config.torch_compile.enable_torch_compile:
-            logger.warning(
-                "CUDA graphs with torch.compile not yet supported. Using torch.compile only."
-            )
+        Must be called *after* :meth:`torch_compile` so that the CUDA graph
+        captures the compiled model forward rather than the un-compiled one.
+        When torch.compile is disabled this is called from ``__init__``.
+        When torch.compile is enabled the caller (e.g. ``PipelineLoader``) is
+        responsible for calling this method after ``torch_compile()``.
+        """
+        if not self.model_config.cuda_graph.enable_cuda_graph:
             return
 
         if len(self.transformer_components) > 1:

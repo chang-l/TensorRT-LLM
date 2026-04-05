@@ -215,6 +215,9 @@ class PipelineLoader:
         if config.torch_compile.enable_torch_compile:
             torch._dynamo.config.cache_size_limit = 128
             pipeline.torch_compile()
+            # Set up CUDA graphs after torch.compile so that graphs capture
+            # the compiled model forward (whole-module or block-level).
+            pipeline._setup_cuda_graphs()
         else:
             logger.info("torch.compile disabled by config")
 
