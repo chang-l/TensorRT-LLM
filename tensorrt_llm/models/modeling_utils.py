@@ -170,6 +170,14 @@ class QuantConfig(StrictBaseModel):
         description=
         "Number of Philox rounds for stochastic rounding PRNG. Higher values give better randomness."
     )
+    use_tunable_fp4_quantize: bool = Field(
+        default=False,
+        description=
+        "When True, use the tunable FP4 quantize op that profiles TRTLLM vs "
+        "FlashInfer backends via AutoTuner. Should only be enabled for workloads "
+        "with large activation tensors (e.g. visual generation) where the "
+        "autotuning overhead is amortized. For LLM decoding, keep False to avoid "
+        "Python dispatch overhead on the hot path.")
 
     @cached_property
     def quant_mode(self) -> QuantModeWrapper:

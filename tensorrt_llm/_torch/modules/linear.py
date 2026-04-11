@@ -1289,8 +1289,17 @@ class NVFP4LinearMethod(LinearMethodBase):
                 input_scale = module.input_scale
                 alpha = module.alpha
 
-            act_fp4, act_sf = torch.ops.trtllm.tunable_fp4_quantize(
-                input, input_scale, module.scaling_vector_size, False)
+            # Use tunable path only for visual gen workloads where large
+            # activation tensors justify the AutoTuner overhead. For LLM
+            # decoding, call fp4_quantize directly to avoid ~12us host overhead
+            # on the hot path.
+            if (module.quant_config is not None
+                    and module.quant_config.use_tunable_fp4_quantize):
+                act_fp4, act_sf = torch.ops.trtllm.tunable_fp4_quantize(
+                    input, input_scale, module.scaling_vector_size, False)
+            else:
+                act_fp4, act_sf = torch.ops.trtllm.fp4_quantize(
+                    input, input_scale, module.scaling_vector_size, False)
             return act_fp4, act_sf, alpha
 
     def apply(self, module: Linear, input: torch.Tensor,

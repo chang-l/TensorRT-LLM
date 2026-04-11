@@ -577,6 +577,10 @@ class DiffusionModelConfig(BaseModel):
             quant_algo=quant_algo,
             group_size=group_size,
             exclude_modules=quant_config_dict.get("ignore"),
+            # Enable tunable FP4 quantize for visual gen: larger activation
+            # tensors (full image/video latents) amortize the AutoTuner
+            # overhead that would otherwise hurt LLM decode latency.
+            use_tunable_fp4_quantize=(quant_algo == QuantAlgo.NVFP4),
         )
 
         # TODO: Per-layer config (None for now - future: parse mixed precision settings)
