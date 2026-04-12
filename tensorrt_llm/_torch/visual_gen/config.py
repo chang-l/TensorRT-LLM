@@ -584,10 +584,6 @@ class DiffusionModelConfig(BaseModel):
             quant_algo=quant_algo,
             group_size=group_size,
             exclude_modules=quant_config_dict.get("ignore"),
-            # Enable tunable FP4 quantize for visual gen: larger activation
-            # tensors (full image/video latents) amortize the AutoTuner
-            # overhead that would otherwise hurt LLM decode latency.
-            use_tunable_fp4_quantize=(quant_algo == QuantAlgo.NVFP4),
         )
 
         # TODO: Per-layer config (None for now - future: parse mixed precision settings)
@@ -844,6 +840,13 @@ class DiffusionModelConfig(BaseModel):
                 quant_config, quant_config_dict, dynamic_weight_quant, dynamic_activation_quant = (
                     cls.load_diffusion_quant_config(quant_dict)
                 )
+
+        # Enable tunable FP4 quantize for visual gen: larger activation
+        # tensors (full image/video latents) amortize the AutoTuner overhead.
+        if quant_config.quant_algo == QuantAlgo.NVFP4:
+            from tensorrt_llm._torch.modules.linear import NVFP4LinearMethod
+
+            NVFP4LinearMethod.use_tunable_quantize = True
 
         return cls(
             pretrained_config=pretrained_config,
