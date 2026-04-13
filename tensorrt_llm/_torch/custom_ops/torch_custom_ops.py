@@ -1,3 +1,4 @@
+import enum
 import threading
 from functools import lru_cache
 from typing import ClassVar, List, Mapping, Optional, Tuple, Union
@@ -2255,14 +2256,19 @@ def _(input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 # =============================================================================
 
 
+class Fp4QuantTactic(enum.IntEnum):
+    """FP4 quantization backend selection."""
+
+    TRTLLM = -1
+    FLASHINFER = 1
+
+
 def _fp4_quantize_dispatch(input: torch.Tensor, input_scale: torch.Tensor,
                            scaling_vector_size: int,
                            is_sf_swizzled_layout: bool,
                            tactic: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """Dispatch FP4 quantization to TRTLLM or FlashInfer kernel."""
-    TACTIC_FLASHINFER = 1
-
-    if tactic == TACTIC_FLASHINFER and IS_FLASHINFER_AVAILABLE:
+    if tactic == Fp4QuantTactic.FLASHINFER and IS_FLASHINFER_AVAILABLE:
         act_fp4, act_sf = _flashinfer_nvfp4_quantize(
             input,
             input_scale,
@@ -2295,9 +2301,6 @@ class Fp4QuantKernelRunner(TunableRunner):
     causes TMA encoding failures on the subsequent real call.
     """
 
-    TACTIC_TRTLLM = 0
-    TACTIC_FLASHINFER = 1
-
     tuning_config = TuningConfig(
         dynamic_tensor_specs=(DynamicTensorSpec(0, 0, ()), ),
         use_cuda_graph=False,
@@ -2317,19 +2320,17 @@ class Fp4QuantKernelRunner(TunableRunner):
         inputs: List[torch.Tensor],
         profile: OptimizationProfile,
     ) -> List[int]:
-        tactics = [self.TACTIC_TRTLLM]
+        tactics = [Fp4QuantTactic.TRTLLM]
         if IS_FLASHINFER_AVAILABLE:
-            tactics.append(self.TACTIC_FLASHINFER)
+            tactics.append(Fp4QuantTactic.FLASHINFER)
         return tactics
 
     def forward(
         self,
         inputs: List[torch.Tensor],
-        tactic: int = -1,
+        tactic: int = Fp4QuantTactic.TRTLLM,
     ) -> torch.Tensor:
         input, input_scale = inputs
-        if tactic == -1:
-            tactic = self.TACTIC_TRTLLM
         act_fp4, act_sf = _fp4_quantize_dispatch(input, input_scale,
                                                  self.scaling_vector_size,
                                                  self.is_sf_swizzled_layout,
@@ -2371,21 +2372,19 @@ def tunable_fp4_quantize(
         [input, input_scale],
     )
 
-    if best_tactic == -1:
-        best_tactic = Fp4QuantKernelRunner.TACTIC_TRTLLM
-
     try:
         act_fp4, act_sf = _fp4_quantize_dispatch(input, input_scale,
                                                  scaling_vector_size,
                                                  is_sf_swizzled_layout,
                                                  best_tactic)
     except Exception:
-        if best_tactic != Fp4QuantKernelRunner.TACTIC_TRTLLM:
+        if best_tactic != Fp4QuantTactic.TRTLLM:
             logger.warning(f"FlashInfer FP4 quantize failed for input shape "
                            f"{input.shape}, falling back to TRTLLM kernel.")
-            act_fp4, act_sf = _fp4_quantize_dispatch(
-                input, input_scale, scaling_vector_size, is_sf_swizzled_layout,
-                Fp4QuantKernelRunner.TACTIC_TRTLLM)
+            act_fp4, act_sf = _fp4_quantize_dispatch(input, input_scale,
+                                                     scaling_vector_size,
+                                                     is_sf_swizzled_layout,
+                                                     Fp4QuantTactic.TRTLLM)
         else:
             raise
     return [act_fp4, act_sf]
