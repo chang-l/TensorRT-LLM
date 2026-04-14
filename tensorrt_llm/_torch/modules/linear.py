@@ -1193,7 +1193,7 @@ class FP8BlockScalesLinearMethod(UnquantizedLinearMethod):
 
 class NVFP4LinearMethod(LinearMethodBase):
 
-    # Temporary workwround which will be resolved by TRTLLM-11958
+    # Temporary workaround which will be resolved by TRTLLM-11958
     # When True, use tunable_fp4_quantize (AutoTuner selects TRTLLM vs
     # FlashInfer). Visual gen pipelines set this to True before model
     # construction; LLM paths leave it False to avoid host overhead.
