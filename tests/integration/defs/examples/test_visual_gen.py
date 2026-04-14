@@ -159,7 +159,10 @@ AESTHETIC_PREDICTOR_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", 
 def _visual_gen_deps(llm_venv):
     """Install av + diffusers + ffmpeg once per session (shared by all video-gen fixtures)."""
     llm_venv.run_cmd(["-m", "pip", "install", "av"])
-    llm_venv.run_cmd(["-m", "pip", "install", "git+https://github.com/huggingface/diffusers.git"])
+    # Pin diffusers to 0.37.1 to avoid device-mismatch regression in
+    # UniPCMultistepScheduler.multistep_uni_p_bh_update introduced by
+    # huggingface/diffusers#13356 (torch.stack on mixed CPU/CUDA rks).
+    llm_venv.run_cmd(["-m", "pip", "install", "diffusers==0.37.1"])
     # Install ffmpeg system package required by MediaStorage.save_video for MP4 encoding
     check_call(["apt-get", "update", "-y"], shell=False)
     check_call(["apt-get", "install", "-y", "ffmpeg"], shell=False)
