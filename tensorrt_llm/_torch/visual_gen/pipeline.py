@@ -52,6 +52,18 @@ def _parse_profile_range():
 
     Returns ``None`` when unset, ``"all"`` for keyword, or
     ``(frozenset(starts), frozenset(stops))`` for numeric ranges.
+
+    .. note::
+       Step indices are **per-request**: each ``denoise()`` call resets the
+       loop counter to 0, so e.g. ``0-4`` profiles steps 0-4 of *every*
+       request. This differs from the LLM path's ``TLLM_PROFILE_START_STOP``
+       which indexes a global executor iteration counter (one forward pass
+       services all in-flight requests, so there is no "per request" index).
+
+       For multi-request capture under ``trtllm-serve``, pair the env var
+       with ``nsys --capture-range-end=repeat:N`` to record up to ``N``
+       requests as separate ``.nsys-rep`` files. ``stop`` and ``stop-shutdown``
+       only retain the first request's window.
     """
     val = os.environ.get("TLLM_PROFILE_START_STOP")
     if not val:
