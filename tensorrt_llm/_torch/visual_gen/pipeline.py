@@ -35,23 +35,29 @@ class ExtraParamSchema(StrictBaseModel):
     )
 
 
-
 def _parse_profile_range():
-    """Parse ``TLLM_PROFILE_START_STOP`` for CUDA profiler scoping.
+    """Parse ``TLLM_PROFILE_VISUAL_GEN_START_STOP`` for CUDA profiler scoping.
 
-    Same env var as the LLM path (PyExecutor) for consistent UX.
-    Use with ``nsys profile -c cudaProfilerApi ...``.
+    Visual-gen-specific env var (separate from the LLM path's
+    ``TLLM_PROFILE_START_STOP``). Use with ``nsys profile -c cudaProfilerApi ...``.
 
-    Supported formats (same as LLM path):
+    Supported formats:
 
     * ``A-B``            – profile denoise steps A through B
     * ``A-B,C-D,...``    – multiple ranges; profiler toggles on/off per range
     * ``A,B,...``        – individual steps treated as single-step ranges
+    * ``predenoise``     – profile the per-request pre-loop work inside
+                           ``denoise()`` (CFG config setup, scheduler refresh,
+                           TeaCache reset) up to the first denoise step.
+                           Single-shot.
+    * ``postdenoise``    – profile from the end of the last denoise step to
+                           pipeline cleanup, covering VAE decode. Single-shot.
     * ``all``            – profile the full generation forward (denoise + VAE), skip warmup
     * (unset)            – no profiler API calls; plain ``nsys profile`` captures everything
 
-    Returns ``None`` when unset, ``"all"`` for keyword, or
-    ``(frozenset(starts), frozenset(stops))`` for numeric ranges.
+    Returns ``None`` when unset, one of ``"all"`` / ``"predenoise"`` /
+    ``"postdenoise"`` for keyword modes, or ``(frozenset(starts), frozenset(stops))``
+    for numeric ranges.
 
     .. note::
        Step indices are **per-request**: each ``denoise()`` call resets the
@@ -60,17 +66,20 @@ def _parse_profile_range():
        which indexes a global executor iteration counter (one forward pass
        services all in-flight requests, so there is no "per request" index).
 
-       For multi-request capture under ``trtllm-serve``, pair the env var
-       with ``nsys --capture-range-end=repeat:N`` to record up to ``N``
-       requests as separate ``.nsys-rep`` files. ``stop`` and ``stop-shutdown``
-       only retain the first request's window.
+       ``predenoise`` and ``postdenoise`` are **single-shot per process**:
+       they fire once around the first user request after warmup and do not
+       re-arm on subsequent requests. Pair ``predenoise`` with
+       ``nsys --capture-range-end=stop`` (keeps the app running cleanly after
+       collection ends). ``postdenoise`` ends collection at process exit, so
+       either ``stop`` or ``stop-shutdown`` works. For multi-request capture,
+       use a numeric range with ``--capture-range-end=repeat:N``.
     """
-    val = os.environ.get("TLLM_PROFILE_START_STOP")
+    val = os.environ.get("TLLM_PROFILE_VISUAL_GEN_START_STOP")
     if not val:
         return None
     val = val.strip()
-    if val.lower() == "all":
-        return "all"
+    if val.lower() in ("all", "predenoise", "postdenoise"):
+        return val.lower()
     # Parse comma-separated ranges: "A-B,C-D,..." or single steps "A,B,..."
     # Same format as the LLM path (PyExecutor._load_iteration_indexes).
     starts, stops = [], []
@@ -128,9 +137,13 @@ class BasePipeline(nn.Module):
         self.scheduler: Optional[Any] = None
         self._is_warmup: bool = False
 
-        # CUDA profiler scoping (TLLM_PROFILE_START_STOP env var)
+        # CUDA profiler scoping (TLLM_PROFILE_VISUAL_GEN_START_STOP env var)
         self._profile_range = _parse_profile_range()
         self._profiling_active: bool = False
+        # Single-shot guards for predenoise/postdenoise modes — fire once
+        # around the first non-warmup denoise() invocation, then disarm.
+        self._predenoise_pending: bool = self._profile_range == "predenoise"
+        self._postdenoise_pending: bool = self._profile_range == "postdenoise"
 
         # Initialize transformer
         self._init_transformer()
@@ -922,6 +935,14 @@ class BasePipeline(nn.Module):
             Single latents if no extra_streams
             Tuple (primary_latents, extra_streams_dict) if extra_streams provided
         """
+        # ``predenoise`` mode: arm the profiler at the very start of denoise()
+        # so the per-request pre-loop work (CFG config, scheduler refresh,
+        # TeaCache reset) is captured. The window closes at the first step.
+        # Note: hooked here (not at warmup() exit) to avoid leaving the profiler
+        # on across the worker's IPC idle, which can interact badly with CUPTI.
+        if self._predenoise_pending and not self._is_warmup:
+            self._cuda_profiler_start()
+
         if timesteps is None:
             timesteps = scheduler.timesteps
 
@@ -963,6 +984,11 @@ class BasePipeline(nn.Module):
         prof = self._profile_range
         if prof == "all" and not self._is_warmup:
             self._cuda_profiler_start()
+        # ``predenoise`` was started in warmup() exit; close the window now,
+        # before the first denoise step kernels run. Single-shot: disarm.
+        if self._predenoise_pending and not self._is_warmup:
+            self._cuda_profiler_stop()
+            self._predenoise_pending = False
         prof_step_starts = prof[0] if isinstance(prof, tuple) else None
         prof_step_stops = prof[1] if isinstance(prof, tuple) else None
 
@@ -1031,6 +1057,12 @@ class BasePipeline(nn.Module):
             # Step-level profiler stop
             if prof_step_stops is not None and i in prof_step_stops and not self._is_warmup:
                 self._cuda_profiler_stop()
+
+        # ``postdenoise`` mode: arm the profiler now so the VAE decode (and
+        # any post-denoise host work) is captured up to cleanup(). Single-shot.
+        if self._postdenoise_pending and not self._is_warmup:
+            self._cuda_profiler_start()
+            self._postdenoise_pending = False
 
         if self.rank == 0:
             total_time = time.time() - start_time
