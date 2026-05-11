@@ -1,0 +1,9 @@
+{
+  "prompt_id": "ball_bouncing",
+  "backend": "sage_blk16",
+  "prompt": "A red ball bouncing on a wooden table, white background",
+  "gen_s": 5.52618408203125,
+  "n_frames": 9,
+  "h": 480,
+  "w": 832
+}

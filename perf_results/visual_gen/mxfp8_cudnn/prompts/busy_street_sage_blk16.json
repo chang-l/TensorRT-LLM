@@ -1,0 +1,9 @@
+{
+  "prompt_id": "busy_street",
+  "backend": "sage_blk16",
+  "prompt": "A person walking across a busy street downtown, midday",
+  "gen_s": 5.536530017852783,
+  "n_frames": 9,
+  "h": 480,
+  "w": 832
+}

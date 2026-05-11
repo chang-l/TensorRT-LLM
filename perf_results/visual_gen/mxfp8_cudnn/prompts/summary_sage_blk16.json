@@ -1,0 +1,105 @@
+{
+  "backend": "TRTLLM",
+  "backend_tag": "sage_blk16",
+  "init_s": 605.930460691452,
+  "rows": [
+    {
+      "prompt_id": "cat_windowsill",
+      "backend": "sage_blk16",
+      "prompt": "A cat sitting still on a windowsill, soft daylight",
+      "gen_s": 7.035567998886108,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "busy_street",
+      "backend": "sage_blk16",
+      "prompt": "A person walking across a busy street downtown, midday",
+      "gen_s": 5.536530017852783,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "ocean_sunset",
+      "backend": "sage_blk16",
+      "prompt": "Ocean waves crashing on rocks at sunset, dramatic lighting",
+      "gen_s": 5.534375190734863,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "clouds_timelapse",
+      "backend": "sage_blk16",
+      "prompt": "A timelapse of clouds moving slowly across a clear sky",
+      "gen_s": 5.537053823471069,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "dancer_jump",
+      "backend": "sage_blk16",
+      "prompt": "A dancer performing a fast spinning jump in a studio",
+      "gen_s": 5.535799741744995,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "flower_blooming",
+      "backend": "sage_blk16",
+      "prompt": "Close-up of a red rose blooming, fine petal detail",
+      "gen_s": 5.546046733856201,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "drone_city_night",
+      "backend": "sage_blk16",
+      "prompt": "A drone shot flying over a city skyline at night, neon lights",
+      "gen_s": 5.546122312545776,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "text_hello",
+      "backend": "sage_blk16",
+      "prompt": "The word 'HELLO' written in chalk on a green chalkboard",
+      "gen_s": 5.526252746582031,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "ball_bouncing",
+      "backend": "sage_blk16",
+      "prompt": "A red ball bouncing on a wooden table, white background",
+      "gen_s": 5.52618408203125,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "empty_room_sun",
+      "backend": "sage_blk16",
+      "prompt": "An empty white room with sunlight coming through a window",
+      "gen_s": 5.555733919143677,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    }
+  ],
+  "config": {
+    "height": 480,
+    "width": 832,
+    "num_frames": 9,
+    "steps": 20,
+    "seed": 42,
+    "sage_blk_k": 16
+  }
+}

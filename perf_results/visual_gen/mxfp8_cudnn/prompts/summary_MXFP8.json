@@ -1,0 +1,105 @@
+{
+  "backend": "MXFP8_CUDNN",
+  "backend_tag": "MXFP8",
+  "init_s": 824.1614878177643,
+  "rows": [
+    {
+      "prompt_id": "cat_windowsill",
+      "backend": "MXFP8",
+      "prompt": "A cat sitting still on a windowsill, soft daylight",
+      "gen_s": 68.47327613830566,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "busy_street",
+      "backend": "MXFP8",
+      "prompt": "A person walking across a busy street downtown, midday",
+      "gen_s": 6.129745244979858,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "ocean_sunset",
+      "backend": "MXFP8",
+      "prompt": "Ocean waves crashing on rocks at sunset, dramatic lighting",
+      "gen_s": 6.105457544326782,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "clouds_timelapse",
+      "backend": "MXFP8",
+      "prompt": "A timelapse of clouds moving slowly across a clear sky",
+      "gen_s": 6.108381271362305,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "dancer_jump",
+      "backend": "MXFP8",
+      "prompt": "A dancer performing a fast spinning jump in a studio",
+      "gen_s": 6.114797592163086,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "flower_blooming",
+      "backend": "MXFP8",
+      "prompt": "Close-up of a red rose blooming, fine petal detail",
+      "gen_s": 6.114163398742676,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "drone_city_night",
+      "backend": "MXFP8",
+      "prompt": "A drone shot flying over a city skyline at night, neon lights",
+      "gen_s": 6.115061521530151,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "text_hello",
+      "backend": "MXFP8",
+      "prompt": "The word 'HELLO' written in chalk on a green chalkboard",
+      "gen_s": 6.119839191436768,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "ball_bouncing",
+      "backend": "MXFP8",
+      "prompt": "A red ball bouncing on a wooden table, white background",
+      "gen_s": 6.115684747695923,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    },
+    {
+      "prompt_id": "empty_room_sun",
+      "backend": "MXFP8",
+      "prompt": "An empty white room with sunlight coming through a window",
+      "gen_s": 6.115675687789917,
+      "n_frames": 9,
+      "h": 480,
+      "w": 832
+    }
+  ],
+  "config": {
+    "height": 480,
+    "width": 832,
+    "num_frames": 9,
+    "steps": 20,
+    "seed": 42,
+    "sage_blk_k": 0
+  }
+}

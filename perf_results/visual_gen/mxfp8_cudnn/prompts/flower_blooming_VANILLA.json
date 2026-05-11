@@ -1,0 +1,9 @@
+{
+  "prompt_id": "flower_blooming",
+  "backend": "VANILLA",
+  "prompt": "Close-up of a red rose blooming, fine petal detail",
+  "gen_s": 5.522859573364258,
+  "n_frames": 9,
+  "h": 480,
+  "w": 832
+}

@@ -1,0 +1,9 @@
+{
+  "prompt_id": "cat_windowsill",
+  "backend": "VANILLA",
+  "prompt": "A cat sitting still on a windowsill, soft daylight",
+  "gen_s": 7.439073085784912,
+  "n_frames": 9,
+  "h": 480,
+  "w": 832
+}
