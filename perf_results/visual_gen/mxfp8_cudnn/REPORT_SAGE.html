@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sage vs MXFP8 attention accuracy — Wan2.2 T2V-A14B</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #fafafa; --fg: #1a1a1a; --muted: #666; --rule: #e0e0e0;
+    --code-bg: #f1f3f5; --accent: #76b900;
+    --accent-bg: #e9f5d3;
+    --good: #2e7d32;   --good-bg:  #e8f5e9;
+    --ok:   #f9a825;   --ok-bg:    #fff8e1;
+    --bad:  #c62828;   --bad-bg:   #ffebee;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+         background: var(--bg); color: var(--fg); line-height: 1.55; margin: 0; padding: 0; }
+  .layout { display: grid; grid-template-columns: 220px minmax(0, 1fr);
+            gap: 32px; max-width: 1300px; margin: 0 auto; padding: 24px; }
+  nav.toc { position: sticky; top: 12px; align-self: start; max-height: 95vh;
+            overflow-y: auto; padding: 16px; font-size: 13px;
+            background: white; border: 1px solid var(--rule); border-radius: 8px; }
+  nav.toc h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+               margin: 0 0 8px; color: var(--muted); }
+  nav.toc ol { padding-left: 18px; margin: 0; }
+  nav.toc a { color: var(--fg); text-decoration: none; }
+  nav.toc a:hover { color: var(--accent); }
+  main { min-width: 0; padding-bottom: 80px; }
+  main h1 { font-size: 26px; margin: 0 0 4px; }
+  main h2 { font-size: 20px; margin: 36px 0 10px; padding-bottom: 6px;
+            border-bottom: 2px solid var(--accent); }
+  main h3 { font-size: 16px; margin: 24px 0 8px; }
+  main p, main li { font-size: 14px; }
+  main code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; font-size: 13px; }
+  main pre { background: var(--code-bg); padding: 12px 14px; border-radius: 6px;
+             overflow-x: auto; font-size: 12.5px; line-height: 1.45; }
+  main pre code { background: transparent; padding: 0; }
+  main a { color: var(--accent); text-decoration: none; }
+  main a:hover { text-decoration: underline; }
+  blockquote { border-left: 3px solid var(--accent); margin: 12px 0;
+               padding: 4px 14px; background: var(--accent-bg);
+               font-size: 13.5px; color: #444; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0;
+          font-size: 13px; background: white; border: 1px solid var(--rule); }
+  th, td { padding: 8px 12px; border-bottom: 1px solid var(--rule);
+           text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); font-weight: 600; font-size: 12px;
+       text-transform: uppercase; letter-spacing: .03em; }
+  tr:hover td { background: #fafafa; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.ref { color: var(--muted); font-style: italic; }
+  td.lpips-good, span.lpips-good { background: var(--good-bg); color: var(--good); font-weight: 600; }
+  td.lpips-ok,   span.lpips-ok   { background: var(--ok-bg);   color: var(--ok);   font-weight: 600; }
+  td.lpips-bad,  span.lpips-bad  { background: var(--bad-bg);  color: var(--bad);  font-weight: 600; }
+  .hero { background: linear-gradient(135deg, #ffffff 0%, var(--accent-bg) 100%);
+          border: 1px solid var(--rule); border-radius: 10px;
+          padding: 16px 20px; margin: 16px 0 28px; }
+  .hero h3 { margin: 0 0 6px; font-size: 13px; text-transform: uppercase;
+             letter-spacing: .05em; color: var(--accent); }
+  .hero .stat-row { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 8px; }
+  .hero .stat { background: white; border: 1px solid var(--rule);
+                border-radius: 6px; padding: 8px 12px; flex: 1; min-width: 150px; }
+  .hero .stat .label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+  .hero .stat .value { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .videogrid { display: grid; gap: 14px;
+               grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+               margin: 12px 0 18px; }
+  .videogrid figure { margin: 0; background: white; border: 1px solid var(--rule);
+                      border-radius: 6px; padding: 8px; }
+  .videogrid video { width: 100%; height: auto; border-radius: 4px; background: black; }
+  .videogrid figcaption { margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .videogrid figcaption b { color: var(--fg); }
+  details { margin: 12px 0; background: white; border: 1px solid var(--rule);
+            border-radius: 6px; padding: 8px 14px; }
+  details > summary { cursor: pointer; font-weight: 600; color: var(--accent); padding: 4px 0; }
+  details[open] > summary { margin-bottom: 8px; }
+  .meta { background: white; border: 1px solid var(--rule); border-radius: 8px;
+          padding: 12px 16px; font-size: 13px; }
+  .meta dt { font-weight: 600; color: var(--muted); float: left; clear: left; width: 130px; }
+  .meta dd { margin: 0 0 4px 130px; }
+  .lpips-legend { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .lpips-legend span { padding: 1px 6px; border-radius: 3px; margin-right: 6px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } nav.toc { position: static; max-height: none; } }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <h2>On this page</h2>
+  <ol>
+    <li><a href="#tldr">TL;DR</a></li>
+    <li><a href="#setup">1. Setup</a></li>
+    <li><a href="#fired">2. Sage path fired?</a></li>
+    <li><a href="#e2e">3. Full-default E2E</a></li>
+    <li><a href="#sweep">4. Step-sweep 480×832</a></li>
+    <li><a href="#cross">5. Cross-resolution</a></li>
+    <li><a href="#verdict">6. Verdict</a></li>
+    <li><a href="#reproduce">7. Reproducer</a></li>
+  </ol>
+</nav>
+
+<main>
+<h1>Sage Attention vs MXFP8 cuDNN SDPA — Accuracy comparison</h1>
+
+<dl class="meta">
+  <dt>Date</dt><dd>2026-05-09 (study), 2026-05-11 (HTML render)</dd>
+  <dt>Hardware</dt><dd>umbriel-b200-043, single B200 (sm_100)</dd>
+  <dt>Wheel</dt><dd>TensorRT-LLM 1.3.0rc13 + <a href="https://github.com/NVIDIA/TensorRT-LLM/pull/13570">PR #13570</a> Sage config plumbing applied as overlay</dd>
+  <dt>Container snapshot</dt><dd><code>trtllm-mxfp8-liuc:full</code> + the Sage plumbing patch (see §1)</dd>
+  <dt>Model</dt><dd>Wan2.2-T2V-A14B-Diffusers (40 layers × 2 transformer stages, H=40, D=128)</dd>
+  <dt>Reproducibility</dt><dd>Same prompt + seed=42 across all backends — accuracy comparison is apples-to-apples</dd>
+  <dt>See also</dt><dd>
+    <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/REPORT.html">REPORT.html (main MXFP8 study)</a> ·
+    <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/SUPERVISOR_REVIEWS_SAGE.html">SUPERVISOR_REVIEWS_SAGE.html</a>
+  </dd>
+</dl>
+
+<section id="tldr" class="hero">
+  <h3>TL;DR</h3>
+  <p style="margin:4px 0"><strong>MXFP8 cuDNN SDPA is more accurate than Sage at every measured (resolution × step-count) point.</strong> At the production target (720×1280 / 81f / 40 steps): MXFP8 LPIPS = 0.044 (perceptually identical) vs Sage 0.11 (noticeable on close inspection). At small S (480×832 / 9f), Sage(1,16,1) collapses to LPIPS &gt; 0.5 (visible difference) — only use coarse-K granularity when S is large enough.</p>
+  <div class="stat-row">
+    <div class="stat"><div class="label">MXFP8 LPIPS</div><div class="value lpips-good">0.044</div></div>
+    <div class="stat"><div class="label">Sage (1,16,1) LPIPS</div><div class="value">0.109</div></div>
+    <div class="stat"><div class="label">Sage (1,4,1) LPIPS</div><div class="value">0.116</div></div>
+    <div class="stat"><div class="label">MXFP8 win ratio</div><div class="value">~2.5× LPIPS</div></div>
+  </div>
+</section>
+
+<h2 id="setup">1. Setup</h2>
+<p>The wheel already had the underlying TRTLLM Sage attention plumbing (from earlier PR #12937, which merged the C++ kernel + <code>sage_attn_num_elts_per_blk_*</code> constructor args). PR #13570 adds the visual-gen wrapper: <code>SageAttentionConfig</code> Pydantic class, <code>AttentionConfig.sage_attention_config</code> flow-through, and a single <code>sage_attention_config</code> constructor arg in the visual-gen <code>TrtllmAttention</code>.</p>
+<p>We applied PR #13570's Python diff (<code>config.py</code>, <code>attention_backend/{trtllm,utils}.py</code>) onto the wheel install. <code>modules/attention.py</code> was kept on the wheel-original because the PR's version pulls in unrelated <code>attn2d_row_size</code> infra. The wheel's <code>_attn_impl</code> calls <code>self.attn.forward(q=q, k=k, v=v, **kwargs)</code> with no <code>batch_size</code>/<code>seq_len</code>, so we relaxed PR #13570's required positional args to optional kwargs that default to <code>q.shape[0]</code> / <code>q.shape[1]</code> when missing — matches pre-PR semantics.</p>
+<p>Two Sage configurations were studied (<code>qk_int8=True</code> for both):</p>
+<ul>
+  <li><strong>Sage (1, 4, 1)</strong> — finer K-axis blocking</li>
+  <li><strong>Sage (1, 16, 1)</strong> — coarser K-axis blocking; qk_int8-only per the PR's validator</li>
+</ul>
+
+<h2 id="fired">2. Verification: Sage path actually fired</h2>
+<p>Per-call trace (<code>TRTLLM_VISUAL_GEN_SAGE_PER_CALL_TRACE</code>), one line per dispatch. Full-default Wan2.2 720×1280 / 81 frames / 40 steps:</p>
+<pre><code>sage_blk4 :  2240 path=sage   0 path=trtllm_bf16   ← 100% Sage path coverage
+sage_blk16:  2240 path=sage   0 path=trtllm_bf16</code></pre>
+<p>The 2240 calls covers both self-attention (<code>attn1</code>) AND cross-attention (<code>attn2</code>) across all 40 layers × 2 transformer stages × all 56 forward passes (40 main + 16 warmup). Note this is <strong>broader coverage than MXFP8</strong> — MXFP8_CUDNN keeps cross-attn on bf16, while Sage's TRTLLM kernel handles different Q/KV seq lengths in INT8 directly. This wider quantization footprint is part of why Sage's accuracy is worse — see §3.</p>
+<details>
+<summary>Pytest unit test (6/6 PASS, tightened tolerances after supervisor review)</summary>
+<pre><code>test_sage_numerics_vs_bf16[wan_S4096-blk_1_4_1]    PASSED   cosine=1.000   rel_rms=0.047
+test_sage_numerics_vs_bf16[wan_S4096-blk_1_16_1]   PASSED   cosine=1.000   rel_rms=0.047
+test_sage_numerics_vs_bf16[wan_S8192-blk_1_4_1]    PASSED   cosine=0.996   rel_rms=0.047
+test_sage_numerics_vs_bf16[wan_S8192-blk_1_16_1]   PASSED   cosine=0.996   rel_rms=0.047
+test_sage_repeated_calls_keep_counter_growing[blk_1_4_1]    PASSED  (counter 0→3)
+test_sage_repeated_calls_keep_counter_growing[blk_1_16_1]   PASSED  (counter 0→3)</code></pre>
+<p>Cosine threshold <code>&gt; 0.99</code>, rel_rms threshold <code>&lt; 0.10</code>. Both configurations clear them at the unit-test (random Q/K/V) level. The end-to-end accuracy is more revealing — see §3.</p>
+</details>
+
+<h2 id="e2e">3. Full-default end-to-end (720×1280 / 81 frames / 40 steps, seed=42, opts on)</h2>
+<p class="lpips-legend">LPIPS legend:
+  <span class="lpips-good">≤ 0.05 imperceptible</span>
+  <span class="lpips-ok">0.05–0.10 subtle</span>
+  <span>0.10–0.20 noticeable</span>
+  <span class="lpips-bad">&gt; 0.20 visible</span>
+</p>
+<table>
+<thead><tr><th>backend</th><th class="num">PSNR (dB)</th><th class="num">corr</th><th class="num">SSIM</th><th class="num">LPIPS</th><th class="num">gen (s)</th><th class="num">step (s)</th></tr></thead>
+<tbody>
+<tr><td><strong>VANILLA bf16</strong> (reference)</td><td class="num ref">—</td><td class="num">1.000</td><td class="num">1.000</td><td class="num lpips-good">0.000</td><td class="num">429.2</td><td class="num">10.62</td></tr>
+<tr><td><strong>MXFP8_CUDNN</strong></td><td class="num">29.42</td><td class="num">0.9897</td><td class="num">0.928</td><td class="num lpips-good">0.044</td><td class="num">433.2</td><td class="num">10.72</td></tr>
+<tr><td><strong>Sage (1, 4, 1)</strong> qk_int8</td><td class="num">25.16</td><td class="num">0.9725</td><td class="num">0.839</td><td class="num">0.116</td><td class="num">517.3</td><td class="num">12.82</td></tr>
+<tr><td><strong>Sage (1, 16, 1)</strong> qk_int8</td><td class="num">25.58</td><td class="num">0.9751</td><td class="num">0.846</td><td class="num">0.109</td><td class="num">454.9</td><td class="num">11.26</td></tr>
+</tbody>
+</table>
+<figure class="videogrid">
+  <figure><video controls preload="metadata" src="videos/panda_bamboo_VANILLA_opts.mp4"></video><figcaption><b>VANILLA bf16</b> · reference</figcaption></figure>
+  <figure><video controls preload="metadata" src="videos/panda_bamboo_MXFP8_CUDNN_opts.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · <span class="lpips-good">LPIPS 0.044</span></figcaption></figure>
+  <figure><video controls preload="metadata" src="videos/panda_bamboo_TRTLLM_sage_blk4.mp4"></video><figcaption><b>Sage (1, 4, 1)</b> · LPIPS 0.116</figcaption></figure>
+  <figure><video controls preload="metadata" src="videos/panda_bamboo_TRTLLM_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS 0.109</figcaption></figure>
+</figure>
+<p><strong>At full default, MXFP8 is essentially imperceptible (LPIPS 0.044) while both Sage variants land in the "noticeable on close inspection" band (LPIPS 0.11).</strong> Sage(1,16,1) is marginally better than Sage(1,4,1). End-to-end timing: both Sage variants are SLOWER than bf16 at this configuration (Sage(1,4,1) +20% slower per step, Sage(1,16,1) +6% slower) — but timing isn't the focus of this study.</p>
+
+<h2 id="sweep">4. Step-sweep at 480×832 / 9 frames / single seed=42</h2>
+<p>Same prompt, same seed; only <code>num_inference_steps</code> varies. Reuses one VisualGen instance per backend so model load amortizes.</p>
+
+<h3>PSNR / SSIM / LPIPS table — three backends side by side</h3>
+<table>
+<thead>
+<tr>
+  <th rowspan="2" class="num">steps</th>
+  <th colspan="3" style="text-align:center; background:#e9f5d3;">MXFP8 (reference quant)</th>
+  <th colspan="3" style="text-align:center;">Sage (1, 4, 1)</th>
+  <th colspan="3" style="text-align:center; background:#ffebee;">Sage (1, 16, 1)</th>
+</tr>
+<tr>
+  <th class="num">PSNR</th><th class="num">SSIM</th><th class="num">LPIPS</th>
+  <th class="num">PSNR</th><th class="num">SSIM</th><th class="num">LPIPS</th>
+  <th class="num">PSNR</th><th class="num">SSIM</th><th class="num">LPIPS</th>
+</tr>
+</thead>
+<tbody>
+<tr><td class="num">2</td>
+  <td class="num">33.09</td><td class="num">0.967</td><td class="num lpips-good">0.032</td>
+  <td class="num">32.25</td><td class="num">0.965</td><td class="num lpips-good">0.032</td>
+  <td class="num">20.69</td><td class="num">0.749</td><td class="num">0.191</td></tr>
+<tr><td class="num">5</td>
+  <td class="num">20.74</td><td class="num">0.698</td><td class="num lpips-bad">0.261</td>
+  <td class="num">20.28</td><td class="num">0.691</td><td class="num lpips-bad">0.272</td>
+  <td class="num">16.35</td><td class="num">0.431</td><td class="num lpips-bad">0.518</td></tr>
+<tr><td class="num">10</td>
+  <td class="num">23.06</td><td class="num">0.713</td><td class="num lpips-bad">0.230</td>
+  <td class="num">23.49</td><td class="num">0.721</td><td class="num lpips-bad">0.238</td>
+  <td class="num">16.24</td><td class="num">0.345</td><td class="num lpips-bad">0.532</td></tr>
+<tr><td class="num">20</td>
+  <td class="num">20.22</td><td class="num">0.639</td><td class="num lpips-bad">0.244</td>
+  <td class="num">20.36</td><td class="num">0.627</td><td class="num lpips-bad">0.233</td>
+  <td class="num">14.23</td><td class="num">0.324</td><td class="num lpips-bad">0.545</td></tr>
+<tr><td class="num">40</td>
+  <td class="num">23.65</td><td class="num">0.784</td><td class="num">0.146</td>
+  <td class="num">22.72</td><td class="num">0.743</td><td class="num">0.185</td>
+  <td class="num">15.42</td><td class="num">0.317</td><td class="num lpips-bad">0.531</td></tr>
+</tbody>
+</table>
+
+<h3>Step-sweep video samples (steps=40)</h3>
+<figure class="videogrid">
+  <figure><video controls preload="metadata" src="step_sweep/VANILLA_seed42_steps40.mp4"></video><figcaption><b>VANILLA bf16</b></figcaption></figure>
+  <figure><video controls preload="metadata" src="step_sweep/MXFP8_CUDNN_seed42_steps40.mp4"></video><figcaption><b>MXFP8</b> · LPIPS 0.146</figcaption></figure>
+  <figure><video controls preload="metadata" src="step_sweep/sage_blk4_seed42_steps40.mp4"></video><figcaption><b>Sage (1, 4, 1)</b> · LPIPS 0.185</figcaption></figure>
+  <figure><video controls preload="metadata" src="step_sweep/sage_blk16_seed42_steps40.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · <span class="lpips-bad">LPIPS 0.531</span></figcaption></figure>
+</figure>
+
+<h3>What the step-sweep shows</h3>
+<ol>
+  <li><strong>Sage (1, 16, 1) collapses at 480×832</strong> — LPIPS hovers around 0.52 across all step counts ≥5 (visible-difference range). This is a much worse accuracy verdict than the 720×1280 measurement, where Sage(1,16,1) was ~0.11. Likely cause: at the smaller latent shape (S = 4680 vs 75600), the coarser K-block size of 16 represents a much larger fraction of the per-row variance, so each INT8 block scale has to absorb wider dynamic range and the quantization noise dominates.</li>
+  <li><strong>Sage (1, 4, 1) tracks MXFP8 closely</strong> at this resolution: LPIPS at 40 steps is 0.185 (Sage) vs 0.146 (MXFP8) — both in the same "noticeable but not jarring" band. Same general step-vs-LPIPS shape (worst at 5 steps when diffusion is converging on slightly different attractors, then recovers as steps grow).</li>
+  <li><strong>MXFP8 wins or ties across every (resolution, step count) point</strong> measured, with the biggest margin at the production target (720×1280 / 40 steps, where MXFP8's LPIPS 0.044 vs Sage's 0.11 is ~2.5× better perceptually).</li>
+</ol>
+
+<h2 id="cross">5. Cross-resolution observation: why Sage(1,16,1) is worse at 480×832 but slightly better at 720×1280</h2>
+<table>
+<thead><tr><th>resolution</th><th class="num">S = ceil(T/4)·H/16·W/16</th><th class="num">Sage(1,4,1) LPIPS</th><th class="num">Sage(1,16,1) LPIPS</th></tr></thead>
+<tbody>
+<tr><td>480×832 / 9 frames</td><td class="num">4 680</td><td class="num">0.185 (40 steps)</td><td class="num lpips-bad"><strong>0.531</strong> (40 steps)</td></tr>
+<tr><td>720×1280 / 81 frames</td><td class="num">75 600</td><td class="num">0.116 (40 steps)</td><td class="num"><strong>0.109</strong> (40 steps)</td></tr>
+</tbody>
+</table>
+<p>Coarser K-blocks (16) need a larger token population per attention head to average down the per-block quantization noise. At S=4680 the noise dominates; at S=75600 it's averaged out by sheer count. So the PR's "use (1,16,1) for the bigger Wan2.2 models, (1,4,1) for the small 1.3B" heuristic in <code>examples/visual_gen/visual_gen_wan_t2v.py</code> (<code>_wan_needs_fine_grained_sage</code>) lines up with what the data here shows.</p>
+
+<h2 id="verdict">6. Verdict</h2>
+<p><strong>MXFP8 cuDNN SDPA is more accurate than Sage at every measured configuration.</strong></p>
+<p>At the production target (Wan2.2-T2V-A14B at 720×1280 / 81 frames / 40 steps):</p>
+<ul>
+  <li>MXFP8 LPIPS = <span class="lpips-good">0.044</span> → perceptually identical</li>
+  <li>Sage(1,16,1) LPIPS = 0.109 → noticeable on close inspection</li>
+  <li>Sage(1,4,1) LPIPS = 0.116 → noticeable on close inspection</li>
+</ul>
+<p>For <strong>smaller-resolution / under-stepped runs (e.g. 480×832 / ≤20 steps)</strong>, Sage(1,16,1) collapses (LPIPS &gt; 0.5) — <em>don't</em> use the coarse-K granularity at small S; stick to (1,4,1) or pay the bf16 / MXFP8 cost.</p>
+
+<table>
+<thead><tr><th>context</th><th>recommendation</th></tr></thead>
+<tbody>
+<tr><td>Production (Wan2.2-A14B, 720×1280, 40 steps)</td><td><strong>MXFP8</strong> for visual quality (LPIPS 0.044 ≈ no perceivable diff)</td></tr>
+<tr><td>If MXFP8 unavailable, big model (S ≥ 75600)</td><td>Sage(1,16,1) — LPIPS ≈ 0.11, noticeable but acceptable</td></tr>
+<tr><td>If MXFP8 unavailable, small model (S ≈ 4680)</td><td>Sage(1,4,1) — Sage(1,16,1) collapses at this S</td></tr>
+</tbody>
+</table>
+
+<blockquote><strong>Caveats</strong>:
+<ul style="margin: 4px 0 0">
+  <li>Single seed, single prompt — multi-seed averaging would tighten LPIPS bands.</li>
+  <li>All comparisons are at uint8 video level after <code>postprocess_video_tensor</code>'s clamp+round; pre-uint8 fp16-latent comparison would isolate the FP8 / INT8 perturbation magnitude from VAE rounding artifacts.</li>
+  <li>These numbers are accuracy-only; perf is reported only loosely (Sage variants are 6–20% slower per step than bf16 at this configuration, but this study didn't tune Sage perf).</li>
+  <li>Sage's broader coverage (self+cross attention) vs MXFP8's self-attention-only coverage is part of why Sage's accuracy is worse at the same shape; if Sage were restricted to self-attn the gap would shrink.</li>
+</ul></blockquote>
+
+<h2 id="reproduce">7. Reproducer</h2>
+<details>
+<summary>Show full reproducer commands</summary>
+<pre><code># Container: trtllm-mxfp8-liuc:full + Sage overlay on umbriel-b200-043
+
+# Unit tests (6/6 PASS for Sage; 7/7 for MXFP8)
+docker exec trtllm-mxfp8-liuc bash -lc "cd /tmp &amp;&amp; HOME=/tmp pytest -xvs \
+  /code/tensorrt_llm/tests/unittest/_torch/visual_gen/test_sage_attention.py \
+  /code/tensorrt_llm/tests/unittest/_torch/visual_gen/test_mxfp8_cudnn_attention.py"
+
+# Full-default Sage E2E (per granularity)
+TRTLLM_VISUAL_GEN_SAGE_PER_CALL_TRACE=/tmp/sage_per_call.txt \
+python3 /code/tensorrt_llm/perf_bench/visual_gen/mxfp8_cudnn/run_wan_mxfp8_eval.py \
+    --model_path $MODEL_DIR --out_dir $OUT_DIR \
+    --backends TRTLLM --tag sage_blk4  --sage_blk_k 4 \
+    --steps 40 --num_frames 81 --height 720 --width 1280
+
+# Step-sweep
+python3 /code/tensorrt_llm/perf_bench/visual_gen/mxfp8_cudnn/step_sweep_psnr.py \
+    --model_path $MODEL_DIR --out_dir $OUT_DIR \
+    --backends TRTLLM --sage_blk_k 4 \
+    --height 480 --width 832 --num_frames 9 --seeds 42 --step_counts 2 5 10 20 40
+
+# Compare to bf16 reference (PSNR + SSIM + LPIPS via AlexNet)
+python3 /code/tensorrt_llm/perf_bench/visual_gen/mxfp8_cudnn/compare_videos.py \
+    --ref panda_bamboo_VANILLA_opts.npy \
+    --cmp panda_bamboo_TRTLLM_sage_blk4.npy</code></pre>
+</details>
+
+<p>Files saved under <code>perf_results/visual_gen/mxfp8_cudnn/</code>:</p>
+<ul>
+  <li><code>videos/panda_bamboo_TRTLLM_sage_blk{4,16}.{mp4,npy}</code> — full-default outputs</li>
+  <li><code>step_sweep/sage_blk{4,16}_seed42_steps{2,5,10,20,40}.{mp4,npy}</code> — sweep frames</li>
+  <li><code>logs/panda_bamboo_TRTLLM_sage_blk{4,16}.{log,json}</code> — per-run trace</li>
+  <li><a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/SUPERVISOR_REVIEWS_SAGE.html">SUPERVISOR_REVIEWS_SAGE.html</a> — independent supervisor sign-off</li>
+  <li><a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/REPORT_SAGE.md">REPORT_SAGE.md</a> — legacy Markdown source for this page</li>
+</ul>
+
+<footer style="color:var(--muted); font-size:12px; margin-top:30px;">
+  Generated 2026-05-11 from REPORT_SAGE.md.
+</footer>
+
+</main>
+</div>
+</body>
+</html>

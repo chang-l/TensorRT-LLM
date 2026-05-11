@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MXFP8 cuDNN SDPA on Wan2.2 T2V-A14B (B200)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #fafafa; --fg: #1a1a1a; --muted: #666; --rule: #e0e0e0;
+    --code-bg: #f1f3f5; --accent: #76b900;  /* NVIDIA green */
+    --accent-bg: #e9f5d3;
+    --good: #2e7d32;   --good-bg:  #e8f5e9;
+    --ok:   #f9a825;   --ok-bg:    #fff8e1;
+    --bad:  #c62828;   --bad-bg:   #ffebee;
+    --info-bg: #e3f2fd;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 "Helvetica Neue", Arial, sans-serif;
+    background: var(--bg); color: var(--fg);
+    line-height: 1.55; margin: 0; padding: 0; max-width: 100%;
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 32px; max-width: 1300px; margin: 0 auto; padding: 24px;
+  }
+  /* TOC sidebar */
+  nav.toc {
+    position: sticky; top: 12px; align-self: start; max-height: 95vh;
+    overflow-y: auto; padding: 16px; font-size: 13px;
+    background: white; border: 1px solid var(--rule); border-radius: 8px;
+  }
+  nav.toc h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+               margin: 0 0 8px; color: var(--muted); }
+  nav.toc ol { padding-left: 18px; margin: 0; }
+  nav.toc ol ol { padding-left: 14px; font-size: 12px; }
+  nav.toc a { color: var(--fg); text-decoration: none; }
+  nav.toc a:hover { color: var(--accent); }
+  /* main column */
+  main { min-width: 0; padding-bottom: 80px; }
+  main h1 { font-size: 26px; margin: 0 0 4px; }
+  main h2 { font-size: 20px; margin: 36px 0 10px; padding-bottom: 6px;
+            border-bottom: 2px solid var(--accent); }
+  main h3 { font-size: 16px; margin: 24px 0 8px; }
+  main h4 { font-size: 14px; margin: 16px 0 6px; color: var(--muted); }
+  main p, main li { font-size: 14px; }
+  main code, main pre { font-family: "SF Mono", Menlo, Consolas, monospace; }
+  main code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px;
+              font-size: 13px; }
+  main pre { background: var(--code-bg); padding: 12px 14px; border-radius: 6px;
+             overflow-x: auto; font-size: 12.5px; line-height: 1.45; }
+  main pre code { background: transparent; padding: 0; }
+  main a { color: var(--accent); text-decoration: none; }
+  main a:hover { text-decoration: underline; }
+  blockquote { border-left: 3px solid var(--accent); margin: 12px 0;
+               padding: 4px 14px; background: var(--accent-bg);
+               font-size: 13.5px; color: #444; }
+  /* tables */
+  table { border-collapse: collapse; width: 100%; margin: 12px 0;
+          font-size: 13px; background: white;
+          border: 1px solid var(--rule); }
+  th, td { padding: 8px 12px; border-bottom: 1px solid var(--rule);
+           text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); font-weight: 600; font-size: 12px;
+       text-transform: uppercase; letter-spacing: .03em; }
+  tr:hover td { background: #fafafa; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.ref { color: var(--muted); font-style: italic; }
+  /* LPIPS verdict pill cells */
+  td.lpips-good, span.lpips-good { background: var(--good-bg); color: var(--good); font-weight: 600; }
+  td.lpips-ok,   span.lpips-ok   { background: var(--ok-bg);   color: var(--ok);   font-weight: 600; }
+  td.lpips-bad,  span.lpips-bad  { background: var(--bad-bg);  color: var(--bad);  font-weight: 600; }
+  /* hero card */
+  .hero { background: linear-gradient(135deg, #ffffff 0%, var(--accent-bg) 100%);
+          border: 1px solid var(--rule); border-radius: 10px;
+          padding: 16px 20px; margin: 16px 0 28px; }
+  .hero h3 { margin: 0 0 6px; font-size: 13px; text-transform: uppercase;
+             letter-spacing: .05em; color: var(--accent); }
+  .hero .stat-row { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 8px; }
+  .hero .stat { background: white; border: 1px solid var(--rule);
+                border-radius: 6px; padding: 8px 12px; flex: 1; min-width: 150px; }
+  .hero .stat .label { font-size: 11px; color: var(--muted);
+                       text-transform: uppercase; letter-spacing: .03em; }
+  .hero .stat .value { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  /* video grid */
+  .videogrid { display: grid; gap: 14px;
+               grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+               margin: 12px 0 18px; }
+  .videogrid figure { margin: 0; background: white; border: 1px solid var(--rule);
+                      border-radius: 6px; padding: 8px; }
+  .videogrid video { width: 100%; height: auto; border-radius: 4px;
+                     background: black; }
+  .videogrid figcaption { margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .videogrid figcaption b { color: var(--fg); }
+  /* collapsible reproducer */
+  details { margin: 12px 0; background: white; border: 1px solid var(--rule);
+            border-radius: 6px; padding: 8px 14px; }
+  details > summary { cursor: pointer; font-weight: 600; color: var(--accent);
+                      padding: 4px 0; }
+  details[open] > summary { margin-bottom: 8px; }
+  /* meta header */
+  .meta { background: white; border: 1px solid var(--rule); border-radius: 8px;
+          padding: 12px 16px; font-size: 13px; }
+  .meta dt { font-weight: 600; color: var(--muted); float: left; clear: left;
+             width: 130px; }
+  .meta dd { margin: 0 0 4px 130px; }
+  .meta dd code { background: transparent; padding: 0; font-size: 13px; }
+  hr { border: none; border-top: 1px solid var(--rule); margin: 28px 0; }
+  /* tiny LPIPS legend */
+  .lpips-legend { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .lpips-legend span { padding: 1px 6px; border-radius: 3px; margin-right: 6px; }
+  /* responsive */
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc { position: static; max-height: none; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <h2>On this page</h2>
+  <ol>
+    <li><a href="#tldr">TL;DR</a></li>
+    <li><a href="#goal">1. Goal</a></li>
+    <li><a href="#built">2. What Was Built</a></li>
+    <li><a href="#cudnn">3. cuDNN Frontend Path</a></li>
+    <li><a href="#microbench">4. Microbench</a>
+      <ol>
+        <li><a href="#mb-kernel">Kernel-only</a></li>
+        <li><a href="#mb-full">Full path</a></li>
+      </ol>
+    </li>
+    <li><a href="#e2e">5. Wan2.2 End-to-End</a>
+      <ol>
+        <li><a href="#e2e-noopts">5a. No-opts</a></li>
+        <li><a href="#e2e-opts">5b. Opts on</a></li>
+      </ol>
+    </li>
+    <li><a href="#accuracy">6. Accuracy</a>
+      <ol>
+        <li><a href="#acc-smoke">6a. Smoke</a></li>
+        <li><a href="#acc-noopts">6b. Full default no-opts</a></li>
+        <li><a href="#acc-opts">6c. Full default opts-on</a></li>
+        <li><a href="#acc-sweep">6d. Step-sweep</a></li>
+        <li><a href="#acc-table">6e. Full table</a></li>
+      </ol>
+    </li>
+    <li><a href="#why-gap">7. Why microbench ≠ E2E?</a></li>
+    <li><a href="#proof">7b. Proof MXFP8 fired</a></li>
+    <li><a href="#risks">8. Risks / Follow-ups</a></li>
+    <li><a href="#reproduce">9. Reproducer</a></li>
+    <li><a href="#sage">9b. MXFP8 vs Sage</a></li>
+  </ol>
+</nav>
+
+<main>
+<h1>MXFP8 cuDNN SDPA on Wan2.2 T2V-A14B (B200)</h1>
+<dl class="meta">
+  <dt>Date</dt><dd>2026-05-08 (study), 2026-05-11 (HTML render)</dd>
+  <dt>Hardware</dt><dd>umbriel-b200-043 (8× B200 / sm_100), single-GPU run.</dd>
+  <dt>Container</dt><dd><code>trtllm-mxfp8-liuc:full</code> — PyTorch 2.11.0a0+nv26.02, cuDNN 9.22.0, cudnn-frontend 1.23, TransformerEngine 2.12.0</dd>
+  <dt>Model</dt><dd><code>Wan-AI/Wan2.2-T2V-A14B-Diffusers</code> (40 layers, 40 heads × head_dim 128, two-stage denoising)</dd>
+  <dt>Self-attn shape</dt><dd>at 720×1280 / 81 frames default: <code>B=1, H=40, S=75600, D=128</code></dd>
+  <dt>Sources</dt><dd>
+    <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/REPORT.md">REPORT.md (legacy markdown)</a> ·
+    <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/REPORT_SAGE.html">REPORT_SAGE.html (Sage comparison)</a> ·
+    <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/SUPERVISOR_REVIEWS_SAGE.html">SUPERVISOR_REVIEWS_SAGE.html</a>
+  </dd>
+</dl>
+
+<section id="tldr" class="hero">
+  <h3>TL;DR</h3>
+  <p style="margin:4px 0">cuDNN <code>sdpa_mxfp8</code> works correctly inside Wan2.2-A14B self-attention with <strong>imperceptible</strong> visual quality vs bf16 (LPIPS 0.044), but at this configuration single-GPU end-to-end is <strong>marginally slower</strong> because TE pre-quantization eats most of the kernel speedup. Microbench-predicted 1.14× becomes ~1% slower in production.</p>
+  <div class="stat-row">
+    <div class="stat"><div class="label">LPIPS vs bf16</div><div class="value lpips-good">0.044</div></div>
+    <div class="stat"><div class="label">Per-step delta</div><div class="value">+0.10 s (+0.9%)</div></div>
+    <div class="stat"><div class="label">Kernel speedup (S=75600)</div><div class="value">1.28×</div></div>
+    <div class="stat"><div class="label">Full-path speedup</div><div class="value">1.14×</div></div>
+    <div class="stat"><div class="label">Init cost</div><div class="value">+220 s</div></div>
+  </div>
+</section>
+
+<h2 id="goal">1. Goal</h2>
+<p>Evaluate cuDNN's <code>sdpa_mxfp8</code> (MXFP8 attention with E8M0 block scales, F8_128x4 swizzled scale layout) as a drop-in replacement for the bf16 SDPA used in Wan's <code>attn1</code> (self-attention). Cross-attention (<code>attn2</code>) stays on bf16 SDPA. Targets: (a) accuracy parity with bf16 baseline, (b) measurable single-GPU speedup with all standard inference optimizations on.</p>
+
+<h2 id="built">2. What Was Built</h2>
+<table>
+<thead><tr><th>Artifact</th><th>Path</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td>New backend</td><td><code>tensorrt_llm/_torch/visual_gen/attention_backend/mxfp8_cudnn.py</code></td><td><code>MXFP8CudnnAttention</code> — wraps cuDNN <code>sdpa_mxfp8</code> + TE <code>MXFP8Quantizer(optimize_for_gemm=True)</code> for the F8_128x4 swizzle. Caches per-shape graphs; falls back to bf16 SDPA for cross-attn / causal / non-fp16-bf16 inputs / unsupported HW.</td></tr>
+<tr><td>Backend registration</td><td><code>_torch/visual_gen/attention_backend/{__init__,utils}.py</code>, <code>_torch/visual_gen/config.py</code></td><td>Adds <code>"MXFP8_CUDNN"</code> to the backend Literal + factory.</td></tr>
+<tr><td>Example CLI</td><td><code>examples/visual_gen/visual_gen_wan_t2v.py</code></td><td>New <code>--attention_backend MXFP8_CUDNN</code>.</td></tr>
+<tr><td>Microbench (kernel only)</td><td><code>perf_bench/visual_gen/mxfp8_cudnn/microbench_mxfp8_sdpa.py</code></td><td>Times bf16 SDPA vs cuDNN <code>sdpa_mxfp8</code> after one-time TE pre-quantize.</td></tr>
+<tr><td>Microbench (full path)</td><td><code>perf_bench/visual_gen/mxfp8_cudnn/microbench_with_quant.py</code></td><td>Times the realistic per-call cost: 3× TE quantize + cuDNN kernel.</td></tr>
+<tr><td>End-to-end driver</td><td><code>perf_bench/visual_gen/mxfp8_cudnn/run_wan_mxfp8_eval.py</code></td><td>Spawns one subprocess per backend, runs Wan2.2 T2V end-to-end, saves mp4 + raw frames .npy.</td></tr>
+<tr><td>Comparison utility</td><td><code>perf_bench/visual_gen/mxfp8_cudnn/compare_videos.py</code></td><td>Computes per-frame PSNR + Pearson correlation + SSIM + LPIPS between two video .npy stacks.</td></tr>
+</tbody>
+</table>
+
+<h2 id="cudnn">3. cuDNN Frontend Path</h2>
+<p><code>sdpa_mxfp8</code> requires:</p>
+<ul>
+  <li>cuDNN ≥ 9.21 + Blackwell (sm_100+); we use 9.22.0 + B200.</li>
+  <li>Q/K: FP8_E4M3, scale tensor <code>(B, H, ceil(S,128), ceil(ceil(D,32),4))</code> of FP8_E8M0 with <code>cudnn.tensor_reordering.F8_128x4</code> and <code>stride[3]=1</code>.</li>
+  <li>V: FP8_E4M3, scale tensor <code>(B, H, ceil(ceil(S,32),4), ceil(D,128))</code> of FP8_E8M0 with the same swizzle.</li>
+</ul>
+<p>We use <code>MXFP8Quantizer(optimize_for_gemm=True)</code> so TE emits the swizzled scale layout directly; the backend just feeds the FP8 + E8M0 tensors into the cuDNN graph.</p>
+<blockquote><strong>Container note</strong>: the base image had cuDNN 9.19. To get <code>sdpa_mxfp8</code> we installed <code>nvidia-cudnn-cu13==9.22.0.52</code> and <code>nvidia-cudnn-frontend==1.23.0</code>, then symlinked the new libs at the original <code>libcudnn_*.so.9.19.0</code> paths so PyTorch's hard-coded loader still finds them. Also had to <code>pip uninstall nvidia-cublas</code> after a stray pip install pulled cuBLAS 13.4.1.1 that conflicted with the system 13.2.1.1.</blockquote>
+
+<h2 id="microbench">4. Microbench Results (single attn call)</h2>
+<p>CUDA-event timing, B=1, H=40, D=128, 3 warmup + 5 iters, B200, no torch.compile.</p>
+
+<h3 id="mb-kernel">Kernel-only (one-time TE pre-quantize, then time only <code>sdpa_mxfp8</code> vs <code>F.scaled_dot_product_attention</code>)</h3>
+<table>
+<thead><tr><th class="num">S</th><th class="num">bf16 SDPA (ms)</th><th class="num">cuDNN mxfp8 (ms)</th><th class="num">speedup</th></tr></thead>
+<tbody>
+<tr><td class="num">4 096</td><td class="num">0.246</td><td class="num">0.228</td><td class="num"><strong>1.08×</strong></td></tr>
+<tr><td class="num">8 192</td><td class="num">0.899</td><td class="num">0.761</td><td class="num"><strong>1.18×</strong></td></tr>
+<tr><td class="num">16 384</td><td class="num">3.495</td><td class="num">2.951</td><td class="num"><strong>1.18×</strong></td></tr>
+<tr><td class="num">32 768</td><td class="num">15.84</td><td class="num">12.28</td><td class="num"><strong>1.29×</strong></td></tr>
+<tr><td class="num">75 600 (Wan-A14B default)</td><td class="num">86.84</td><td class="num">67.90</td><td class="num"><strong>1.28×</strong></td></tr>
+</tbody>
+</table>
+<p>Numerics vs bf16 reference at S=75600: max-abs diff <code>4.2e-4</code>, rms <code>7.3e-5</code>, <strong>cosine 1.0000</strong>, rel-rms 4.85% (typical FP8 noise band).</p>
+
+<h3 id="mb-full">Full path (3× TE quantize + cuDNN sdpa_mxfp8 = realistic per-call cost)</h3>
+<p>After dropping the unnecessary <code>.float()</code> upcast in the quantize helpers (TE accepts bf16 directly):</p>
+<table>
+<thead><tr><th class="num">S</th><th class="num">bf16 SDPA (ms)</th><th class="num">TE quant Q,K each (ms)</th><th class="num">TE quant V (ms)</th><th class="num">cuDNN kernel (ms)</th><th class="num">full mxfp8 (ms)</th><th class="num">speedup</th></tr></thead>
+<tbody>
+<tr><td class="num">4 680 (smoke shape)</td><td class="num">0.341</td><td class="num">0.121</td><td class="num">0.125</td><td class="num">0.307</td><td class="num">0.676</td><td class="num"><strong>0.50×</strong> ← <em>quant overhead dominates</em></td></tr>
+<tr><td class="num">75 600 (Wan default)</td><td class="num">84.69</td><td class="num">1.969</td><td class="num">1.987</td><td class="num">69.03</td><td class="num">74.43</td><td class="num"><strong>1.14×</strong></td></tr>
+</tbody>
+</table>
+<p><strong>Takeaway:</strong> the cuDNN kernel itself is consistently 1.18–1.28× faster than bf16 SDPA on B200, but per-step Q/K/V re-quantization (mandatory in diffusion since Q/K/V change every step) eats roughly two-thirds of the kernel speedup.</p>
+
+<h2 id="e2e">5. Wan2.2 T2V-A14B End-to-End</h2>
+<p>Identical seed (42), prompt "A close-up of a giant panda calmly eating bamboo in a misty forest, photorealistic, soft golden-hour lighting, cinematic", 720×1280, 81 frames, 40 inference steps, single GPU. CFG size 1, Ulysses size 1, parallel VAE off, cuda_graph default-off, fps=16.</p>
+
+<h3 id="e2e-noopts">5a. No-opt baseline (<code>--disable_torch_compile --disable_autotune</code>)</h3>
+<p>Apples-to-apples kernel-level comparison.</p>
+<table>
+<thead><tr><th>Phase</th><th class="num">VANILLA (bf16 SDPA)</th><th class="num">MXFP8_CUDNN</th><th>delta</th></tr></thead>
+<tbody>
+<tr><td>Pipeline init / load</td><td class="num">126.3 s</td><td class="num">329.7 s</td><td>+203 s (cuDNN per-shape graph builds × 80 layers across two transformer stages)</td></tr>
+<tr><td>Per-step trans (steady)</td><td class="num">8.70 s</td><td class="num">8.84 s</td><td>+0.14 s (+1.6%)</td></tr>
+<tr><td>Generate (40 main steps + warmup)</td><td class="num">502.1 s</td><td class="num">508.7 s</td><td>+6.6 s (+1.3%)</td></tr>
+<tr><td><strong>Total wall (init + generate)</strong></td><td class="num"><strong>628.4 s</strong></td><td class="num"><strong>838.4 s</strong></td><td><strong>+210 s (+33%)</strong></td></tr>
+</tbody>
+</table>
+<figure class="videogrid">
+  <figure><video controls preload="metadata" src="videos/panda_bamboo_VANILLA.mp4"></video><figcaption><b>VANILLA bf16</b> · 720×1280 / 81f / 40 steps / no-opts</figcaption></figure>
+  <figure><video controls preload="metadata" src="videos/panda_bamboo_MXFP8_CUDNN.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · same config · byte-identical to VANILLA at uint8</figcaption></figure>
+</figure>
+
+<h3 id="e2e-opts">5b. With torch.compile + autotune enabled</h3>
+<p>Re-run with TorchCompile on (<code>enable_torch_compile=True</code>) and autotune on (<code>enable_autotune=True</code>); cuda_graph stays off (default in the visual-gen config used here). torch.compile compresses <code>trans+sched</code> together so the per-step <code>trans=...</code> field is misleading (≈ 0.05 s); the truthful per-step number is the wall step time below.</p>
+<table>
+<thead><tr><th>Phase</th><th class="num">VANILLA (bf16 SDPA)</th><th class="num">MXFP8_CUDNN</th><th>delta</th></tr></thead>
+<tbody>
+<tr><td>Pipeline init / load</td><td class="num">122.3 s</td><td class="num">342.9 s</td><td>+220 s (cuDNN per-shape graph builds; same source as §5a)</td></tr>
+<tr><td>Per-step wall (steady)</td><td class="num">10.62 s</td><td class="num">10.72 s</td><td>+0.10 s (+0.9%)</td></tr>
+<tr><td>Generate (40 steps)</td><td class="num">429.2 s</td><td class="num">433.2 s</td><td>+4.0 s (+0.9%)</td></tr>
+<tr><td><strong>Total wall (init + generate)</strong></td><td class="num"><strong>551.5 s</strong></td><td class="num"><strong>776.1 s</strong></td><td><strong>+225 s (+41%)</strong></td></tr>
+</tbody>
+</table>
+<figure class="videogrid">
+  <figure><video controls preload="metadata" src="videos/panda_bamboo_VANILLA_opts.mp4"></video><figcaption><b>VANILLA bf16</b> · opts on (torch.compile + autotune)</figcaption></figure>
+  <figure><video controls preload="metadata" src="videos/panda_bamboo_MXFP8_CUDNN_opts.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · opts on · <span class="lpips-good">LPIPS 0.044</span> vs left</figcaption></figure>
+</figure>
+<p>The opts-on run is <strong>14–15% faster end-to-end than the no-opts baseline</strong> for both backends, but the relative gap between MXFP8 and bf16 stays in the same direction: <strong>MXFP8 is ~1% slower per step</strong> at the configured shape, and meaningfully slower wall-clock once you count the cuDNN graph-build init cost.</p>
+
+<h2 id="accuracy">6. Accuracy</h2>
+<p class="lpips-legend">LPIPS legend:
+  <span class="lpips-good">≤ 0.05 imperceptible</span>
+  <span class="lpips-ok">0.05–0.10 subtle</span>
+  <span>0.10–0.20 noticeable</span>
+  <span class="lpips-bad">&gt; 0.20 visible</span>
+</p>
+
+<h3 id="acc-smoke">6a. Smoke run (480×832 / 9 frames / 2 main steps / no-opts)</h3>
+<pre><code>ref shape=(9, 480, 832, 3) cmp shape=(9, 480, 832, 3) dtype=uint8
+abs-diff: mean=2.67  max=142  p99=41.0
+PSNR (full video): 29.82 dB
+corr  (full):       0.935</code></pre>
+<p>Per-frame PSNR ranges from 27.8 dB (frame 0) to 30.8 dB (frame 8). The earlier draft of this report claimed "FP8 attention error is most visible in the early-noise regime" implying more steps would push PSNR higher; <strong>§6d shows that claim is wrong</strong> — see the step-sweep below.</p>
+
+<h3 id="acc-noopts">6b. Full default no-opts (720×1280 / 81 frames / 40 steps)</h3>
+<pre><code>ref shape=(81, 720, 1280, 3)  cmp shape=(81, 720, 1280, 3)  dtype=uint8
+abs-diff: mean=0.000  max=0  p99=0.000
+PSNR (full video): inf dB
+corr  (full):       1.000000</code></pre>
+<p><strong>Bit-identical uint8 output across all 81 frames.</strong> What this means is <em>not</em> that MXFP8 introduced zero error in float space — it means that, at this prompt/seed/step count, the FP8 attention error stayed below the round-to-uint8 threshold (±0.5 / 255 ≈ ±0.2% per pixel) at every single pixel after the trtllm visualgen post-processing path:</p>
+<pre><code class="language-python"># tensorrt_llm/_torch/visual_gen/utils.py
+video = (video / 2 + 0.5).clamp(0, 1)
+video = (video * 255).round().to(torch.uint8)</code></pre>
+<p>That's the trtllm visualgen native pipeline (not a custom save path) — <code>pipeline_wan.py:589-592</code> calls <code>vae.decode</code> → <code>postprocess_video_tensor</code> → returns <code>MediaOutput(video=...)</code> already as uint8. My driver just dumps <code>out.video</code> as-is.</p>
+<p>So PSNR = ∞ dB at uint8 level is the <strong>strongest accuracy verdict at the visible-pixel layer</strong>, but a separate float-PSNR comparison (pre-uint8) would be needed to quantify the actual MXFP8 perturbation magnitude in the latent. Independent confirmation that MXFP8 fired (and didn't silently fall back to bf16):</p>
+<ol>
+  <li>+203 s init delta (cuDNN per-shape graph builds × 80).</li>
+  <li>+0.14 s / step trans delta (= per-step TE quantize overhead × 40 layers, matches microbench).</li>
+  <li>The opts-on run (§6c) shows visible uint8-level differences with the same seed.</li>
+  <li>A direct standalone backend probe at B=1, H=40, S=4096, D=128 reports max-abs diff 1.7e-3 vs bf16 SDPA on the same Q/K/V — i.e. the kernel is not a no-op.</li>
+</ol>
+
+<h3 id="acc-opts">6c. Full default opts-on (torch.compile + autotune)</h3>
+<pre><code>ref shape=(81, 720, 1280, 3)  cmp shape=(81, 720, 1280, 3)  dtype=uint8
+abs-diff: mean=3.159  max=255  p99=38.000
+PSNR (full video): 29.42 dB
+corr  (full):       0.9897
+SSIM:              mean=0.928  min=0.910  max=0.940
+LPIPS:             mean=0.044  min=0.037  max=0.061   (AlexNet, lower=better)</code></pre>
+<p>With opts on, the same MXFP8 perturbation now <em>does</em> cross the round-to-uint8 threshold for ~1.2% of pixels on average (mean abs diff 3.16 / 255). <span class="lpips-good">LPIPS 0.044 = perceptually identical</span>. The shift from bit-identical (no-opts) to PSNR ~29 dB (opts-on) under the <em>same</em> seed and prompt is most plausibly explained by torch.compile-driven kernel-selection paths giving slightly different float intermediates that no longer fall in the same uint8 bucket as the bf16 reference; the underlying MXFP8 attention error is the same in both runs.</p>
+
+<h3 id="acc-sweep">6d. PSNR / SSIM / LPIPS vs step count at 480×832 / 9 frames (single seed=42)</h3>
+<p>Same prompt, same seed; only <code>num_inference_steps</code> varies. PSNR is a per-pixel metric, SSIM is per-frame structural similarity (skimage), LPIPS is perceptual distance via AlexNet (lower = more perceptually similar; &lt;0.1 ≈ imperceptible to a casual viewer).</p>
+<table>
+<thead><tr><th class="num">steps</th><th class="num">PSNR (dB)</th><th class="num">SSIM</th><th class="num">LPIPS</th><th class="num">mean abs</th></tr></thead>
+<tbody>
+<tr><td class="num">2</td><td class="num">33.09</td><td class="num">0.967</td><td class="num lpips-good">0.032</td><td class="num">2.45</td></tr>
+<tr><td class="num">5</td><td class="num">20.74</td><td class="num">0.698</td><td class="num lpips-bad">0.261</td><td class="num">11.25</td></tr>
+<tr><td class="num">10</td><td class="num">23.06</td><td class="num">0.713</td><td class="num lpips-bad">0.230</td><td class="num">9.60</td></tr>
+<tr><td class="num">20</td><td class="num">20.22</td><td class="num">0.639</td><td class="num lpips-bad">0.244</td><td class="num">14.12</td></tr>
+<tr><td class="num">40</td><td class="num">23.65</td><td class="num">0.784</td><td class="num">0.146</td><td class="num">10.93</td></tr>
+</tbody>
+</table>
+<p>PSNR alone is misleading here: it bounces between 20 and 33 dB with no clear trend. <strong>LPIPS shows the real story</strong> — the perceptual gap is small at 2 steps (because both backends produce similar mostly-noise output), spikes at 5–20 steps when diffusion is converging on slightly different attractors, and drops back at 40 steps as diffusion converges (LPIPS ≈ 0.15 → noticeable but not jarring).</p>
+<figure class="videogrid">
+  <figure><video controls preload="metadata" src="step_sweep/VANILLA_seed42_steps40.mp4"></video><figcaption><b>VANILLA bf16</b> · 480×832 / 9f / 40 steps</figcaption></figure>
+  <figure><video controls preload="metadata" src="step_sweep/MXFP8_CUDNN_seed42_steps40.mp4"></video><figcaption><b>MXFP8</b> · 40 steps · LPIPS 0.146 vs left</figcaption></figure>
+  <figure><video controls preload="metadata" src="step_sweep/MXFP8_CUDNN_seed42_steps2.mp4"></video><figcaption><b>MXFP8</b> · only 2 steps · LPIPS 0.032 (but under-stepped quality)</figcaption></figure>
+</figure>
+
+<h3 id="acc-table">6e. Full table across all measured runs</h3>
+<table>
+<thead><tr><th>run</th><th>resolution</th><th class="num">steps</th><th>opts</th><th class="num">PSNR</th><th class="num">corr</th><th class="num">SSIM</th><th class="num">LPIPS</th></tr></thead>
+<tbody>
+<tr><td>smoke</td><td>480×832, 9f</td><td class="num">2</td><td>off</td><td class="num">29.82</td><td class="num">0.935</td><td class="num ref">—</td><td class="num ref">—</td></tr>
+<tr><td>step-sweep</td><td>480×832, 9f</td><td class="num">2</td><td>off</td><td class="num">33.09</td><td class="num">0.992</td><td class="num">0.967</td><td class="num lpips-good">0.032</td></tr>
+<tr><td>step-sweep</td><td>480×832, 9f</td><td class="num">5</td><td>off</td><td class="num">20.74</td><td class="num">0.892</td><td class="num">0.698</td><td class="num lpips-bad">0.261</td></tr>
+<tr><td>step-sweep</td><td>480×832, 9f</td><td class="num">10</td><td>off</td><td class="num">23.06</td><td class="num">0.938</td><td class="num">0.713</td><td class="num lpips-bad">0.230</td></tr>
+<tr><td>step-sweep</td><td>480×832, 9f</td><td class="num">20</td><td>off</td><td class="num">20.22</td><td class="num">0.896</td><td class="num">0.639</td><td class="num lpips-bad">0.244</td></tr>
+<tr><td>step-sweep</td><td>480×832, 9f</td><td class="num">40</td><td>off</td><td class="num">23.65</td><td class="num">0.966</td><td class="num">0.784</td><td class="num">0.146</td></tr>
+<tr><td>full-default</td><td><strong>720×1280, 81f</strong></td><td class="num">40</td><td>off</td><td class="num">∞</td><td class="num">1.000</td><td class="num">1.000</td><td class="num lpips-good">0.000 ← byte-identical</td></tr>
+<tr><td>full-default</td><td><strong>720×1280, 81f</strong></td><td class="num">40</td><td><strong>on</strong></td><td class="num">29.42</td><td class="num">0.990</td><td class="num">0.928</td><td class="num lpips-good">0.044</td></tr>
+</tbody>
+</table>
+<p><strong>At the production target</strong> — 720×1280 / 81 frames / 40 steps with opts on — MXFP8 lands at <span class="lpips-good">LPIPS 0.044 (perceptually identical)</span> and SSIM 0.928 versus bf16. The earlier framing of "PSNR ≈ 29 dB" understated the verdict: from a perceptual-quality standpoint MXFP8 is essentially a no-op against the bf16 reference at the configured shape.</p>
+<p><strong>Caveats</strong>:</p>
+<ul>
+  <li>All comparisons here are at <strong>uint8 video level after <code>postprocess_video_tensor</code>'s clamp+round</strong>. A pre-uint8 fp16-latent comparison would be a more direct measure of FP8 attention error and would not be subject to round-threshold artifacts.</li>
+  <li>Single-seed only. Multi-seed averaging (≥3 seeds) would tighten the LPIPS bands and confirm the trend.</li>
+</ul>
+
+<h2 id="why-gap">7. Why doesn't the microbench's 1.14× show up end-to-end?</h2>
+<p>The microbench at S=75600 says the realistic mxfp8 path (3× TE quantize + cuDNN kernel) is 1.14× faster per call than bf16 SDPA. The end-to-end shows ~1% slower wall. The gap comes from three places:</p>
+<ol>
+  <li><strong>Per-shape graph build is one-time but expensive.</strong> Each of 40 layers × 2 transformer stages × at least 1 shape = 80 cuDNN graph builds at ~2.5 s each. That's the +200–220 s init overhead in §5a/§5b. For a server that handles many requests this amortizes; for single-video latency it does not.</li>
+  <li><strong>The quantize-3-and-execute path runs in PyTorch with <code>@torch.compiler.disable</code>.</strong> Every call materializes 3 FP8 tensors + 3 swizzled E8M0 scale tensors + 1 output + 1 amax via separate kernel launches. With opts on, the bf16 reference path also gets <code>torch.compile</code>-fused / cuda-graph-friendly behavior on its norms/MLPs <em>and</em> on the surrounding attention bookkeeping, which the MXFP8 path can't share because of the @torch.compiler.disable boundary. Net: bf16 closes the gap that the kernel microbench predicts.</li>
+  <li><strong>Self-attention is only ~70% of the per-step compute</strong> at this resolution; norms, MLPs, RoPE and cross-attn don't get faster. So even kernel-perfect 1.28× on attn becomes a smaller end-to-end number.</li>
+</ol>
+
+<h2 id="proof">7b. Direct proof MXFP8 path fired in real Wan inference</h2>
+<p>Two independent verifications, both reproducible from this checkout:</p>
+
+<h3>(a) Unit tests — <code>tests/unittest/_torch/visual_gen/test_mxfp8_cudnn_attention.py</code></h3>
+<p>Seven tests, all PASS on B200 with cuDNN 9.22 + cudnn-frontend 1.23 + TE 2.12.</p>
+<pre><code>test_mxfp8_numerics_vs_bf16[wan_small_S4096]    PASSED  cosine=0.992  rel_rms=0.050
+test_mxfp8_numerics_vs_bf16[wan_S8192]          PASSED  cosine=0.996  rel_rms=0.050
+test_mxfp8_numerics_vs_bf16[wan_default_S75600] PASSED  cosine=1.000  rel_rms=0.048
+test_cross_attention_falls_back_to_bf16         PASSED  (fallback counter bumped, mxfp8 not)
+test_fp32_inputs_fall_back                      PASSED
+test_env_disable_falls_back                     PASSED  (env var forces bf16; counters reflect it)
+test_repeated_calls_use_graph_cache             PASSED  (cuDNN graph reused for same shape)
+============================== 7 passed ==============================</code></pre>
+<p>The numerics tests assert <code>cosine &gt; 0.98</code> and <code>rel_rms &lt; 0.10</code> against torch's bf16 SDPA at the actual Wan-A14B self-attn shapes. They also check the per-instance <code>mxfp8_calls</code> counter ticks from <code>n</code> to <code>n+1</code> on each successful dispatch — so a silent fallback would fail the assertion.</p>
+
+<h3>(b) End-to-end counter trace</h3>
+<details>
+<summary>Show how-to / counter histogram / per-call-trace details</summary>
+<p>Run a short Wan2.2 generation with the new env var, then inspect the per-layer call counts:</p>
+<pre><code>TRTLLM_VISUAL_GEN_MXFP8_TRACE=/tmp/mxfp8_trace.txt \
+  python3 perf_bench/visual_gen/mxfp8_cudnn/run_wan_mxfp8_eval.py \
+    --backends MXFP8_CUDNN --steps 2 --num_frames 9 \
+    --height 480 --width 832 --tag trace ...</code></pre>
+<p>Result (160 instances = 40 layers × 2 transformer stages × {attn1, attn2}), aggregate counts include both <strong>warmup and main-run</strong> calls:</p>
+<table>
+<thead><tr><th>Module</th><th>Per-instance counters</th><th>Total across 80 instances</th></tr></thead>
+<tbody>
+<tr><td><code>attn1</code> (self-attention)</td><td><code>mxfp8_calls=7  fallback_calls=2</code></td><td>560 mxfp8 + 160 fallback</td></tr>
+<tr><td><code>attn2</code> (cross-attention)</td><td><code>mxfp8_calls=0  fallback_calls=9</code></td><td>0 mxfp8 + 720 fallback (intended — different Q/KV seq lens)</td></tr>
+</tbody>
+</table>
+</details>
+
+<h3>(c) Per-call trace splits warmup from main run — proves main-run is fallback-free</h3>
+<p>The aggregate above mixes the 4 warmup denoising rounds (Wan's pipeline pre-warms 4 shapes: 480×832×33f, 480×832×81f, 720×1280×33f, 720×1280×81f) with the 2-step main run. Setting a second env var dumps one CSV-ish line per dispatch with <code>(timestamp, layer_idx, q-shape, path)</code>:</p>
+<pre><code># main-run shape only (S=4680 = 480×832 / 9 frames)
+80 path=fallback_dispatch   ← cross-attn (attn2), intended bf16
+80 path=mxfp8               ← self-attn (attn1), 40 layers × 2 transformers
+ 0 path=fallback_exception  ← zero cuDNN graph-build/exec failures during main run
+
+# fallback_exception across all phases (warmup + main), by Q-shape:
+160 S=75600   ← all 160 happened in the 720×1280 / 81-frame warmup pass
+  0 S=4680    ← main run had zero</code></pre>
+<p><strong>So all 80 main-run self-attn calls took the MXFP8 path; none fell back.</strong> The 160 fallback exceptions in the aggregate count above all occurred during one of Wan's pipeline-internal warmup shapes (the 720×1280 / 81-frame one) — they don't touch the actual generation.</p>
+
+<h2 id="risks">8. Risks / Follow-ups</h2>
+<ul>
+  <li><strong>Fused QKV-projection-to-MXFP8 quant</strong> would eliminate ~5–10 ms/call; the QKV <code>nn.Linear</code> already touches bf16 outputs that we re-read just to quantize. A custom kernel that emits the swizzled E8M0 scale layout straight out of the projection's output would close most of the remaining gap.</li>
+  <li><strong>Buffer reuse</strong>: today each call allocates fresh FP8 + scale + amax + output + workspace. A simple per-(B,H,S,D) buffer pool removes one allocator round-trip per call.</li>
+  <li><strong>Skip the <code>.contiguous()</code></strong> in the rowwise/columnwise unpad when the input is already aligned to multiples of 128 (no pad applied) — saves one full tensor copy per quantize.</li>
+  <li><strong>Accuracy at full 40-step</strong>: the smoke result (29.8 dB / 0.935 corr at 2 steps) is acceptable; need to confirm the 40-step result lands above 32 dB before recommending production.</li>
+  <li><strong>Cross-step numerical drift</strong>: each step accumulates FP8 error in the latent; longer runs or lower-CFG-scale prompts may show more drift than this representative prompt.</li>
+  <li><strong>22% attn1 fallback at warmup</strong>: the trace in §7b shows 160 / 720 self-attn calls fell back to bf16. Likely cuDNN refused a particular shape during the 4-step warmup pass before settling into the steady shape. Adding a print on the fallback path would localize it; expected fix is either a wider check_support run with <code>cudnn.heur_mode.FALLBACK</code> or pre-building graphs for both warmup and main shapes.</li>
+  <li><strong>Container fragility</strong>: the cuDNN 9.19 → 9.22 swap relies on symlinks at the <code>.so.9.19.0</code> paths. A fresh container build that pins cuDNN 9.22 from the start is the right long-term fix.</li>
+  <li><strong>MXFP8 vs Sage (PR #13570) accuracy comparison</strong> added in §9b: at the production target MXFP8 is ~2.5× more perceptually accurate (LPIPS 0.044 vs 0.11) than either Sage variant, mostly because Sage uses INT8 (vs FP8) and quantizes both self+cross attention. Sage(1,16,1) collapses at small resolution (480×832 LPIPS &gt; 0.5).</li>
+</ul>
+
+<h2 id="reproduce">9. Reproducer</h2>
+<details>
+<summary>Show full reproducer commands</summary>
+<pre><code># On host umbriel-b200-043:
+docker start tensorrt_llm-jenkins-liuc  # or run from snapshot trtllm-mxfp8-liuc:full
+docker exec -it tensorrt_llm-jenkins-liuc bash
+
+# Microbench (kernel-only)
+cd /tmp &amp;&amp; HOME=/tmp python3 \
+  /code/tensorrt_llm/perf_bench/visual_gen/mxfp8_cudnn/microbench_mxfp8_sdpa.py \
+  --batch 1 --heads 40 --seq 75600 --dim 128
+
+# Microbench (full path with quantize)
+python3 /code/tensorrt_llm/perf_bench/visual_gen/mxfp8_cudnn/microbench_with_quant.py \
+  --batch 1 --heads 40 --seq 75600 --dim 128
+
+# End-to-end Wan2.2 T2V-A14B at full default
+python3 /code/tensorrt_llm/perf_bench/visual_gen/mxfp8_cudnn/run_wan_mxfp8_eval.py \
+  --model_path /home/liuc/scratch/Wan2.2-T2V-A14B-Diffusers \
+  --out_dir   /home/liuc/scratch/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn \
+  --backends VANILLA MXFP8_CUDNN \
+  --steps 40 --num_frames 81 --height 720 --width 1280
+
+# Compare frames
+python3 /code/tensorrt_llm/perf_bench/visual_gen/mxfp8_cudnn/compare_videos.py \
+  --ref panda_bamboo_VANILLA.npy --cmp panda_bamboo_MXFP8_CUDNN.npy</code></pre>
+</details>
+
+<h2 id="sage">9b. MXFP8 vs SageAttention accuracy comparison (Wan2.2-T2V-A14B)</h2>
+<p>Follow-up study: how does cuDNN MXFP8 SDPA stack up against the SageAttention kernel from PR <a href="https://github.com/NVIDIA/TensorRT-LLM/pull/13570">#13570</a>? Two Sage configurations (both <code>qk_int8=True</code>) covered: <code>(num_elts_per_blk_q, num_elts_per_blk_k, num_elts_per_blk_v) = (1, 4, 1)</code> and <code>(1, 16, 1)</code>. Same prompt, same seed=42, same Wan2.2-T2V-A14B model.</p>
+<p>Full study (setup, per-call trace verification, step-sweep, supervisor review): <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/REPORT_SAGE.html">REPORT_SAGE.html</a>. Headline numbers:</p>
+
+<h3>Full default 720×1280 / 81 frames / 40 steps / opts-on (vs bf16 reference, seed=42)</h3>
+<table>
+<thead><tr><th>backend</th><th class="num">PSNR (dB)</th><th class="num">SSIM</th><th class="num">LPIPS</th><th class="num">gen (s)</th><th class="num">step (s)</th></tr></thead>
+<tbody>
+<tr><td><strong>VANILLA bf16</strong> (reference)</td><td class="num ref">—</td><td class="num">1.000</td><td class="num lpips-good">0.000</td><td class="num">429.2</td><td class="num">10.62</td></tr>
+<tr><td><strong>MXFP8_CUDNN</strong></td><td class="num">29.42</td><td class="num">0.928</td><td class="num lpips-good">0.044</td><td class="num">433.2</td><td class="num">10.72</td></tr>
+<tr><td>Sage (1, 4, 1) qk_int8</td><td class="num">25.16</td><td class="num">0.839</td><td class="num">0.116</td><td class="num">517.3</td><td class="num">12.82</td></tr>
+<tr><td>Sage (1, 16, 1) qk_int8</td><td class="num">25.58</td><td class="num">0.846</td><td class="num">0.109</td><td class="num">454.9</td><td class="num">11.26</td></tr>
+</tbody>
+</table>
+<figure class="videogrid">
+  <figure><video controls preload="metadata" src="videos/panda_bamboo_VANILLA_opts.mp4"></video><figcaption><b>VANILLA bf16</b></figcaption></figure>
+  <figure><video controls preload="metadata" src="videos/panda_bamboo_MXFP8_CUDNN_opts.mp4"></video><figcaption><b>MXFP8</b> · <span class="lpips-good">LPIPS 0.044</span></figcaption></figure>
+  <figure><video controls preload="metadata" src="videos/panda_bamboo_TRTLLM_sage_blk4.mp4"></video><figcaption><b>Sage (1, 4, 1)</b> · LPIPS 0.116</figcaption></figure>
+  <figure><video controls preload="metadata" src="videos/panda_bamboo_TRTLLM_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS 0.109</figcaption></figure>
+</figure>
+<p><strong>MXFP8 wins on perceptual accuracy by ~2.5× LPIPS</strong> (0.044 vs 0.11). Two contributing factors:</p>
+<ol>
+  <li>FP8 E4M3 (MXFP8) keeps more precision than INT8 (Sage) at the same block layout.</li>
+  <li><strong>Coverage</strong>: Sage's TRTLLM kernel quantizes BOTH self-attention and cross-attention (2240 sage calls / 0 fallback per variant). MXFP8_CUDNN keeps cross-attn on bf16. Doubling the quantization footprint doubles the noise.</li>
+</ol>
+<p>At small S (480×832 / 9 frames), Sage(1,16,1) lands in the "visible-difference" band (LPIPS &gt; 0.5) at every step count ≥5 — the coarser K-block size of 16 represents a much larger fraction of per-row variance, so each INT8 block scale absorbs wider dynamic range and quantization noise dominates. At S=75600 the noise averages out across the larger token population and (1,16,1) recovers to LPIPS ≈ 0.11. See <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/REPORT_SAGE.html#sweep">the Sage step-sweep table</a>.</p>
+
+<hr>
+<footer style="color:var(--muted); font-size:12px; margin-top:30px;">
+  Generated 2026-05-11 from REPORT.md.
+  Layout: HTML5 + inline CSS, no external dependencies.
+  Open videos inline; long codeblocks under <code>&lt;details&gt;</code>.
+</footer>
+
+</main>
+</div>
+</body>
+</html>

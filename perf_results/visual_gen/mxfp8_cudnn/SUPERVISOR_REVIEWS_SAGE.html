@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Supervisor reviews — Sage attention accuracy study</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #fafafa; --fg: #1a1a1a; --muted: #666; --rule: #e0e0e0;
+    --code-bg: #f1f3f5; --accent: #76b900; --accent-bg: #e9f5d3;
+    --good: #2e7d32; --good-bg: #e8f5e9;
+    --bad: #c62828;  --bad-bg:  #ffebee;
+    --warn: #f9a825; --warn-bg: #fff8e1;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+         background: var(--bg); color: var(--fg); line-height: 1.55; margin: 0; padding: 0; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 24px; margin: 0 0 6px; }
+  h2 { font-size: 18px; margin: 28px 0 8px; padding-bottom: 4px; border-bottom: 2px solid var(--accent); }
+  h3 { font-size: 14px; margin: 18px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  p, li { font-size: 14px; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; font-size: 13px; }
+  pre { background: var(--code-bg); padding: 12px 14px; border-radius: 6px; overflow-x: auto; font-size: 12.5px; }
+  blockquote { border-left: 3px solid var(--accent); margin: 12px 0; padding: 4px 14px;
+               background: var(--accent-bg); font-size: 13.5px; color: #444; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0;
+          font-size: 13px; background: white; border: 1px solid var(--rule); }
+  th, td { padding: 8px 12px; border-bottom: 1px solid var(--rule); text-align: left; }
+  th { background: var(--code-bg); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+  td.pass, span.pass { background: var(--good-bg); color: var(--good); font-weight: 600; }
+  td.fail, span.fail { background: var(--bad-bg);  color: var(--bad);  font-weight: 600; }
+  td.warn, span.warn { background: var(--warn-bg); color: var(--warn); font-weight: 600; }
+  .meta { background: white; border: 1px solid var(--rule); border-radius: 8px;
+          padding: 12px 16px; font-size: 13px; margin-bottom: 18px; }
+  .meta dt { font-weight: 600; color: var(--muted); float: left; clear: left; width: 120px; }
+  .meta dd { margin: 0 0 4px 120px; }
+  hr { border: none; border-top: 1px solid var(--rule); margin: 28px 0; }
+  .review-card { background: white; border: 1px solid var(--rule); border-radius: 8px;
+                 padding: 16px 20px; margin: 18px 0; }
+  .review-card h2 { margin-top: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Supervisor reviews — Sage attention accuracy study</h1>
+<dl class="meta">
+  <dt>Role</dt><dd>Independent reviewer / read-only verifier of worker checkpoints (not silent fallback, not test theater).</dd>
+  <dt>See also</dt><dd>
+    <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/REPORT.html">REPORT.html (main MXFP8 study)</a> ·
+    <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/REPORT_SAGE.html">REPORT_SAGE.html</a> ·
+    <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/SUPERVISOR_REVIEWS_SAGE.md">SUPERVISOR_REVIEWS_SAGE.md (legacy markdown)</a>
+  </dd>
+</dl>
+
+<section class="review-card">
+<h2>Review #1 — Acknowledgement (study kickoff)</h2>
+<p>Supervisor acknowledged the role and verification checklist:</p>
+<ol>
+  <li>Overlaid <code>SageAttentionConfig</code> matches PR #13570 spec.</li>
+  <li>Counter instrumentation present.</li>
+  <li>Pytest covers BOTH (1,4,1) and (1,16,1) at S ∈ {4096, 8192, 75600} with <code>cos &gt; 0.98</code> and <code>rel_rms &lt; 0.10</code>.</li>
+  <li>End-to-end mp4 + npy exist; per-call traces show non-zero <code>path=sage</code> at S=75600 and zero <code>fallback_exception</code> in main run.</li>
+  <li>10 npy files = 5 step-counts × 2 variants.</li>
+  <li>Spot-rerun <code>compare_videos.py</code> on at least one pair.</li>
+  <li>Final table includes all four backends with LPIPS as perceptual verdict.</li>
+</ol>
+<p>Will append per-step PASS/FAIL.</p>
+</section>
+
+<section class="review-card">
+<h2>Review #2 — Steps 1-3 verification</h2>
+<blockquote><strong>Tooling note</strong>: in this session the supervisor's harness denied Bash, Write, WebFetch, and read access to the wheel install path. So the review covers what was readable from the in-repo files; the wheel-overlay byte-diff vs PR ref <code>3f92685565562982d01e9bb1e16997a81c332898</code> could not be performed and is deferred.</blockquote>
+
+<h3>6-bullet verdict</h3>
+<ul>
+  <li><span class="pass">PASS-conditional</span> · <strong>Step 1 plumbing</strong>. Worker's reported smoke (validator instantiating <code>AttentionConfig(backend="TRTLLM", sage_attention_config=...)</code>, factory returning <code>MXFP8CudnnAttention</code> and <code>TrtllmAttention</code>, validator scrubbing <code>VANILLA + sage</code> to <code>None</code> with a log) is the right shape. Byte-verify against PR #13570 next session.</li>
+  <li><span class="pass">PASS</span> · <strong>Step 1 reverting <code>modules/attention.py</code></strong>. The wheel's <code>_attn_impl</code> (in-repo line 326) calls <code>self.attn.forward(q=q, k=k, v=v, **kwargs)</code> with no <code>batch_size</code>/<code>seq_len</code>. The PR's <code>attention.py</code> would have forced <code>attn2d_row_size</code> infra into unrelated parallel paths; revert was correct.</li>
+  <li><span class="pass">PASS</span> with one ask · <strong>Step 2 counters + per-call trace</strong>. Instance-attr counters bumped per branch are simple and verifiable (Step 3's <code>test_sage_repeated_calls_keep_counter_growing</code> confirms strict increment). <code>__del__</code> is unreliable on interpreter shutdown — depend on <code>_per_call_log</code> file, not the dump-on-destruct, and <strong><code>flush()</code> after each append</strong> so a mid-step crash doesn't lose the tail.</li>
+  <li><span class="pass">PASS</span> · <strong>Step 3 test file structure</strong>. <code>test_sage_attention.py</code> parametrizes Wan-style <code>(B=1, H=40, S ∈ {4096, 8192}, D=128)</code> and both granularities <code>(1,4,1)</code>/<code>(1,16,1)</code>, correctly reshapes between HND ref and NHD backend, and counter-test independently exercises Step 2.</li>
+  <li><span class="pass">PASS</span> · <strong><code>forward()</code> signature relaxation, legitimate</strong>. The wheel's <code>_attn_impl</code> calls <code>forward(q=, k=, v=, **kwargs)</code> and the in-repo non-PR <code>TrtllmAttention.forward()</code> already derives <code>batch_size = q.shape[0]; seq_len = q.shape[1]</code> (lines 270-272). Making the PR's required positional args optional with shape-derived defaults exactly matches pre-PR semantics — not masking a deeper mismatch. <strong>ACTION</strong>: log the divergence in the perf_results README so a future reader doesn't think the overlay matches PR #13570 byte-for-byte.</li>
+  <li><span class="fail">FAIL</span> · <strong>Test tolerances <code>cos &gt; 0.95, rel_rms &lt; 0.20</code> too loose</strong>. Observed cos ≈ 0.996, rel_rms ≈ 0.048 — an order of magnitude inside the asserted bounds. A genuine regression would still pass. <strong>Tighten to <code>cos &gt; 0.99</code> and <code>rel_rms &lt; 0.10</code></strong> (still ~2× slack). Separately: same <code>seed=0</code> across shapes gives near-equivalent samples; pass distinct seeds (e.g. <code>seed=S</code>) per shape.</li>
+</ul>
+
+<h3>Verdict table</h3>
+<table>
+<thead><tr><th>Item</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr><td>Step 1 plumbing</td><td class="pass">PASS-conditional (subject to PR-ref byte-diff)</td></tr>
+<tr><td>Step 1 revert of <code>modules/attention.py</code></td><td class="pass">PASS</td></tr>
+<tr><td>Step 2 counters + per-call trace</td><td class="pass">PASS (add <code>flush()</code> after each append)</td></tr>
+<tr><td>Step 3 test file structure</td><td class="pass">PASS</td></tr>
+<tr><td>Step 3 test tolerance + seeding</td><td class="fail">FAIL — tighten to <code>cos &gt; 0.99</code>, <code>rel_rms &lt; 0.10</code>; per-shape seed</td></tr>
+<tr><td><code>forward()</code> signature relaxation</td><td class="pass">PASS (legitimate; document divergence)</td></tr>
+</tbody>
+</table>
+
+<h3>Step 4 acceptance gate (preview)</h3>
+<p>Beyond rendered-video accuracy: confirm the <code>_per_call_log</code> shows <code>sage_calls &gt; 0</code> and <code>fallback_calls == 0</code> for <strong>every DiT layer × every one of the 40 main steps</strong>, for both granularities. That's the load-bearing assertion that the sage path actually fired in production — unit tests don't cover it.</p>
+
+<h3>Files reviewed</h3>
+<ul>
+  <li><code>tests/unittest/_torch/visual_gen/test_sage_attention.py</code></li>
+  <li>In-repo HEAD versions of <code>tensorrt_llm/_torch/visual_gen/{attention_backend/trtllm.py, attention_backend/utils.py, config.py, modules/attention.py}</code> (NOT the overlay).</li>
+</ul>
+<p>Could not access: actual wheel-overlaid files at <code>/usr/local/lib/python3.12/dist-packages/tensorrt_llm/...</code> and PR #13570 reference at SHA <code>3f92685565562982d01e9bb1e16997a81c332898</code>.</p>
+</section>
+
+<footer style="color:var(--muted); font-size:12px; margin-top:30px;">
+  Generated 2026-05-11 from SUPERVISOR_REVIEWS_SAGE.md.
+</footer>
+
+</div>
+</body>
+</html>
