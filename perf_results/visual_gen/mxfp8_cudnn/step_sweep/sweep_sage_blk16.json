@@ -1,0 +1,37 @@
+[
+  {
+    "backend": "TRTLLM",
+    "seed": 42,
+    "steps": 2,
+    "gen_s": 1.8245980739593506,
+    "out": "sage_blk16_seed42_steps2"
+  },
+  {
+    "backend": "TRTLLM",
+    "seed": 42,
+    "steps": 5,
+    "gen_s": 2.1867144107818604,
+    "out": "sage_blk16_seed42_steps5"
+  },
+  {
+    "backend": "TRTLLM",
+    "seed": 42,
+    "steps": 10,
+    "gen_s": 4.126392841339111,
+    "out": "sage_blk16_seed42_steps10"
+  },
+  {
+    "backend": "TRTLLM",
+    "seed": 42,
+    "steps": 20,
+    "gen_s": 8.02111029624939,
+    "out": "sage_blk16_seed42_steps20"
+  },
+  {
+    "backend": "TRTLLM",
+    "seed": 42,
+    "steps": 40,
+    "gen_s": 18.3619647026062,
+    "out": "sage_blk16_seed42_steps40"
+  }
+]

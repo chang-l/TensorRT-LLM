@@ -37,7 +37,7 @@ def get_visual_gen_attention_backend(
     Get diffusion attention backend class by name.
 
     Args:
-        backend_name: Backend identifier ("VANILLA", "TRTLLM", "FA4")
+        backend_name: Backend identifier ("VANILLA", "TRTLLM", "FA4", "MXFP8_CUDNN")
 
     Returns:
         Diffusion attention backend class
@@ -49,9 +49,12 @@ def get_visual_gen_attention_backend(
                     Better performance but requires fused QKV
         - "FA4": Flash Attention 4; provides higher speedup on Blackwell GPUs (sm100)
                          Requires flash-attn package with cute interface
+        - "MXFP8_CUDNN": cuDNN MXFP8 SDPA (sm100+, cuDNN >= 9.21).
+                         Self-attention only; cross-attention falls back to bf16 SDPA.
     """
     # Lazy imports to avoid circular dependency
     from .flash_attn4 import FlashAttn4Attention
+    from .mxfp8_cudnn import MXFP8CudnnAttention
     from .trtllm import TrtllmAttention
     from .vanilla import VanillaAttention
 
@@ -63,6 +66,8 @@ def get_visual_gen_attention_backend(
         return TrtllmAttention
     elif backend_name == "FA4":
         return FlashAttn4Attention
+    elif backend_name == "MXFP8_CUDNN":
+        return MXFP8CudnnAttention
     else:
         # Default to VANILLA for maximum compatibility
         return VanillaAttention

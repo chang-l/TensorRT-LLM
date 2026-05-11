@@ -185,10 +185,10 @@ def parse_args():
         "--attention_backend",
         type=str,
         default="VANILLA",
-        choices=["VANILLA", "TRTLLM", "FA4"],
+        choices=["VANILLA", "TRTLLM", "FA4", "MXFP8_CUDNN"],
         help="Attention backend (VANILLA: PyTorch SDPA, TRTLLM: optimized kernels, "
-        "FA4: Flash Attention 4). "
-        "Note: TRTLLM falls back to VANILLA for cross-attention.",
+        "FA4: Flash Attention 4, MXFP8_CUDNN: cuDNN MXFP8 SDPA on Blackwell). "
+        "Note: TRTLLM and MXFP8_CUDNN fall back to VANILLA for cross-attention.",
     )
 
     # Parallelism

@@ -1,0 +1,37 @@
+[
+  {
+    "backend": "VANILLA",
+    "seed": 42,
+    "steps": 2,
+    "gen_s": 2.6880953311920166,
+    "out": "VANILLA_seed42_steps2"
+  },
+  {
+    "backend": "VANILLA",
+    "seed": 42,
+    "steps": 5,
+    "gen_s": 2.5053231716156006,
+    "out": "VANILLA_seed42_steps5"
+  },
+  {
+    "backend": "VANILLA",
+    "seed": 42,
+    "steps": 10,
+    "gen_s": 4.740846395492554,
+    "out": "VANILLA_seed42_steps10"
+  },
+  {
+    "backend": "VANILLA",
+    "seed": 42,
+    "steps": 20,
+    "gen_s": 9.246915578842163,
+    "out": "VANILLA_seed42_steps20"
+  },
+  {
+    "backend": "VANILLA",
+    "seed": 42,
+    "steps": 40,
+    "gen_s": 18.184444904327393,
+    "out": "VANILLA_seed42_steps40"
+  }
+]

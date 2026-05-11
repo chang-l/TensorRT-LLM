@@ -1,0 +1,231 @@
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.6.3) or chardet (6.0.0.post1)/charset_normalizer (3.4.4) doesn't match a supported version!
+  warnings.warn(
+Skipping import of cpp extensions due to incompatible torch version 2.11.0a0+eb65b36914.nv26.02 for torchao version 0.15.0             Please see https://github.com/pytorch/ao/issues/2919 for more info
+/usr/local/lib/python3.12/dist-packages/modelopt/torch/__init__.py:36: UserWarning: transformers version 4.57.3 is incompatible with nvidia-modelopt and may cause issues. Please install recommended version with `pip install nvidia-modelopt[hf]` if working with HF models.
+  _warnings.warn(
+🚨 Config not found for parakeet. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+🚨 Config not found for parakeet. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+🚨 Config not found for parakeet. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+[TensorRT-LLM] TensorRT LLM version: 1.3.0rc13
+[05/09/2026-05:52:21] [TRT-LLM] [I] [vis_gen ] DiffusionClient: Background thread started
+[05/09/2026-05:52:21] [TRT-LLM] [I] [vis_gen ] DiffusionClient: Initializing IPC
+[05/09/2026-05:52:21] [TRT-LLM] [I] [vis_gen ] DiffusionClient: IPC ready
+[05/09/2026-05:52:21] [TRT-LLM] [I] [vis_gen ] DiffusionClient: Launching 1 workers
+[05/09/2026-05:52:21] [TRT-LLM] [I] [vis_gen ] DiffusionClient: Waiting for workers
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.6.3) or chardet (6.0.0.post1)/charset_normalizer (3.4.4) doesn't match a supported version!
+  warnings.warn(
+Skipping import of cpp extensions due to incompatible torch version 2.11.0a0+eb65b36914.nv26.02 for torchao version 0.15.0             Please see https://github.com/pytorch/ao/issues/2919 for more info
+/usr/local/lib/python3.12/dist-packages/modelopt/torch/__init__.py:36: UserWarning: transformers version 4.57.3 is incompatible with nvidia-modelopt and may cause issues. Please install recommended version with `pip install nvidia-modelopt[hf]` if working with HF models.
+  _warnings.warn(
+🚨 Config not found for parakeet. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+🚨 Config not found for parakeet. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+🚨 Config not found for parakeet. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+[TensorRT-LLM] TensorRT LLM version: 1.3.0rc13
+[05/09/2026-05:52:34] [TRT-LLM] [I] [_torch  ] Worker 0: Connecting to request queue
+[05/09/2026-05:52:34] [TRT-LLM] [I] [_torch  ] Worker 0: Connecting to response queue
+[05/09/2026-05:52:34] [TRT-LLM] [I] [_torch  ] Worker 0: Loading pipeline
+[05/09/2026-05:52:34] [TRT-LLM] [I] [_torch  ] Loading config from /home/liuc/scratch/Wan2.2-T2V-A14B-Diffusers
+[05/09/2026-05:52:35] [TRT-LLM] [I] [_torch  ] Creating pipeline with MetaInitMode
+[05/09/2026-05:52:35] [TRT-LLM] [I] [_torch  ] AutoPipeline: Creating WanPipeline from /home/liuc/scratch/Wan2.2-T2V-A14B-Diffusers
+[05/09/2026-05:52:35] [TRT-LLM] [I] [_torch  ] Creating WAN transformer with quantization support...
+[05/09/2026-05:52:35] [TRT-LLM] [I] [_torch  ] Creating second transformer for Wan2.2 two-stage denoising...
+[05/09/2026-05:52:35] [TRT-LLM] [I] [_torch  ] Transformer components: ['transformer', 'transformer_2']
+Loading transformer:   0%|          | 0/12 [00:00<?, ?it/s]Loading transformer: 100%|██████████| 12/12 [00:00<00:00, 296.64it/s]
+Loading transformer_2:   0%|          | 0/12 [00:00<?, ?it/s]Loading transformer_2: 100%|██████████| 12/12 [00:00<00:00, 306.76it/s]
+[05/09/2026-05:52:35] [TRT-LLM] [I] [_torch  ] Loading transformer weights...
+Loading weights: 0it [00:00, ?it/s]Loading weights: 10it [00:00, 68.48it/s]Loading weights: 20it [00:00, 82.65it/s]Loading weights: 43it [00:00, 135.22it/s]Loading weights: 58it [00:00, 139.52it/s]Loading weights: 76it [00:00, 145.87it/s]Loading weights: 97it [00:00, 160.00it/s]Loading weights: 114it [00:00, 156.21it/s]Loading weights: 133it [00:00, 163.00it/s]Loading weights: 150it [00:01, 156.83it/s]Loading weights: 166it [00:01, 156.37it/s]Loading weights: 187it [00:01, 167.60it/s]Loading weights: 204it [00:01, 161.05it/s]Loading weights: 223it [00:01, 167.23it/s]Loading weights: 240it [00:01, 159.81it/s]Loading weights: 257it [00:01, 162.40it/s]Loading weights: 277it [00:01, 168.43it/s]Loading weights: 294it [00:01, 162.10it/s]Loading weights: 313it [00:02, 167.73it/s]Loading weights: 330it [00:02, 159.99it/s]Loading weights: 350it [00:02, 154.19it/s]Loading weights: 373it [00:02, 169.88it/s]Loading weights: 391it [00:02, 163.74it/s]Loading weights: 408it [00:02, 164.95it/s]Loading weights: 425it [00:02, 165.84it/s]Loading weights: 442it [00:02, 155.45it/s]Loading weights: 463it [00:02, 166.77it/s]Loading weights: 480it [00:03, 160.00it/s]Loading weights: 497it [00:03, 161.24it/s]Loading weights: 515it [00:03, 166.32it/s]Loading weights: 532it [00:03, 155.58it/s]Loading weights: 553it [00:03, 168.87it/s]Loading weights: 571it [00:03, 163.21it/s]Loading weights: 590it [00:03, 153.83it/s]Loading weights: 613it [00:03, 171.57it/s]Loading weights: 631it [00:03, 165.07it/s]Loading weights: 648it [00:04, 166.27it/s]Loading weights: 667it [00:04, 167.34it/s]Loading weights: 684it [00:04, 161.77it/s]Loading weights: 703it [00:04, 167.37it/s]Loading weights: 720it [00:04, 159.85it/s]Loading weights: 740it [00:04, 154.36it/s]Loading weights: 763it [00:04, 170.69it/s]Loading weights: 781it [00:04, 163.94it/s]Loading weights: 798it [00:04, 165.13it/s]Loading weights: 817it [00:05, 166.95it/s]Loading weights: 834it [00:05, 162.71it/s]Loading weights: 853it [00:05, 167.37it/s]Loading weights: 870it [00:05, 160.21it/s]Loading weights: 887it [00:05, 160.76it/s]Loading weights: 907it [00:05, 166.08it/s]Loading weights: 924it [00:05, 160.92it/s]Loading weights: 943it [00:05, 166.85it/s]Loading weights: 960it [00:05, 159.77it/s]Loading weights: 977it [00:06, 161.49it/s]Loading weights: 997it [00:06, 167.98it/s]Loading weights: 1014it [00:06, 162.11it/s]Loading weights: 1033it [00:06, 167.95it/s]Loading weights: 1050it [00:06, 159.69it/s]Loading weights: 1067it [00:06, 162.44it/s]Loading weights: 1087it [00:06, 167.46it/s]Loading weights: 1104it [00:06, 161.85it/s]Loading weights: 1123it [00:06, 165.96it/s]Loading weights: 1140it [00:07, 159.22it/s]Loading weights: 1156it [00:07, 159.10it/s]Loading weights: 1177it [00:07, 166.95it/s]Loading weights: 1194it [00:07, 162.79it/s]Loading weights: 1213it [00:07, 167.55it/s]Loading weights: 1220it [00:07, 161.45it/s]
+[05/09/2026-05:52:43] [TRT-LLM] [I] [_torch  ] Transformer weights loaded successfully.
+[05/09/2026-05:52:43] [TRT-LLM] [I] [_torch  ] Loading transformer_2 weights for Wan2.2...
+Loading weights: 0it [00:00, ?it/s]Loading weights: 10it [00:00, 70.23it/s]Loading weights: 25it [00:00, 105.70it/s]Loading weights: 46it [00:00, 133.15it/s]Loading weights: 65it [00:00, 151.81it/s]Loading weights: 81it [00:00, 143.34it/s]Loading weights: 103it [00:00, 161.50it/s]Loading weights: 120it [00:00, 154.96it/s]Loading weights: 136it [00:00, 156.10it/s]Loading weights: 157it [00:01, 165.13it/s]Loading weights: 174it [00:01, 160.82it/s]Loading weights: 193it [00:01, 166.71it/s]Loading weights: 210it [00:01, 160.32it/s]Loading weights: 227it [00:01, 162.19it/s]Loading weights: 247it [00:01, 168.76it/s]Loading weights: 264it [00:01, 162.20it/s]Loading weights: 283it [00:01, 168.28it/s]Loading weights: 300it [00:01, 159.05it/s]Loading weights: 320it [00:02, 154.33it/s]Loading weights: 343it [00:02, 173.75it/s]Loading weights: 361it [00:02, 168.97it/s]Loading weights: 380it [00:02, 159.23it/s]Loading weights: 403it [00:02, 176.98it/s]Loading weights: 422it [00:02, 168.46it/s]Loading weights: 440it [00:02, 161.74it/s]Loading weights: 463it [00:02, 179.32it/s]Loading weights: 482it [00:02, 169.90it/s]Loading weights: 500it [00:03, 162.07it/s]Loading weights: 523it [00:03, 174.36it/s]Loading weights: 541it [00:03, 168.46it/s]Loading weights: 559it [00:03, 171.05it/s]Loading weights: 577it [00:03, 167.70it/s]Loading weights: 594it [00:03, 162.41it/s]Loading weights: 613it [00:03, 167.04it/s]Loading weights: 630it [00:03, 160.70it/s]Loading weights: 650it [00:04, 154.61it/s]Loading weights: 673it [00:04, 171.43it/s]Loading weights: 691it [00:04, 165.42it/s]Loading weights: 708it [00:04, 166.57it/s]Loading weights: 727it [00:04, 167.11it/s]Loading weights: 744it [00:04, 162.99it/s]Loading weights: 763it [00:04, 170.06it/s]Loading weights: 781it [00:04, 166.33it/s]Loading weights: 800it [00:04, 157.26it/s]Loading weights: 823it [00:05, 175.43it/s]Loading weights: 841it [00:05, 168.79it/s]Loading weights: 859it [00:05, 170.99it/s]Loading weights: 877it [00:05, 167.08it/s]Loading weights: 894it [00:05, 161.41it/s]Loading weights: 913it [00:05, 166.49it/s]Loading weights: 930it [00:05, 159.94it/s]Loading weights: 947it [00:05, 161.53it/s]Loading weights: 967it [00:05, 168.62it/s]Loading weights: 984it [00:06, 161.94it/s]Loading weights: 1003it [00:06, 168.27it/s]Loading weights: 1020it [00:06, 160.43it/s]Loading weights: 1037it [00:06, 162.77it/s]Loading weights: 1057it [00:06, 168.43it/s]Loading weights: 1074it [00:06, 162.09it/s]Loading weights: 1093it [00:06, 166.86it/s]Loading weights: 1110it [00:06, 158.77it/s]Loading weights: 1126it [00:06, 157.52it/s]Loading weights: 1147it [00:07, 166.13it/s]Loading weights: 1164it [00:07, 160.80it/s]Loading weights: 1183it [00:07, 165.27it/s]Loading weights: 1200it [00:07, 159.46it/s]Loading weights: 1216it [00:07, 158.81it/s]Loading weights: 1220it [00:07, 163.29it/s]
+[05/09/2026-05:52:50] [TRT-LLM] [I] [_torch  ] Transformer_2 weights loaded successfully.
+[05/09/2026-05:52:50] [TRT-LLM] [I] [_torch  ] Detected Wan 2.2 T2V (two-stage denoising)
+[05/09/2026-05:52:50] [TRT-LLM] [I] [_torch  ] Loading tokenizer...
+[05/09/2026-05:52:51] [TRT-LLM] [I] [_torch  ] Loading text encoder...
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 94.58it/s]
+[05/09/2026-05:52:52] [TRT-LLM] [I] [_torch  ] Loading VAE...
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] Loading scheduler...
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] Model loaded successfully in 18.43s
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] torch.compile: transformer.blocks (40 blocks, mode=default)
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] torch.compile: transformer_2.blocks (40 blocks, mode=default)
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] [Autotuner] Autotuning process starts ...
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] Running warmup for WanPipeline with 4 shapes and 4 steps...
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] Warmup: 480x832, 33 frames, 4 steps
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] Running Wan 2.2 T2V inference(boundary_ratio=0.875, has_transformer_2=True)
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] Encoding prompts...
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] Prompt encoding completed in 0.33s
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] Wan2.2 two-stage denoising: boundary_timestep=875.0, guidance_scale=5.0, guidance_scale_2=5.0
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] Denoising: 4 steps, guidance=5.0
+[05/09/2026-05:52:53] [TRT-LLM] [I] [_torch  ] Switched to transformer (high-noise) at timestep 999.0
+[05/09/2026-05:52:55] [TRT-LLM] [I] [_torch  ] PDL enabled
+/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/attention_backend/trtllm.py:1198: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.detach().clone() or sourceTensor.detach().clone().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  prompt_lens = torch.tensor(
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:2152: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at 'trtllm.py:1976'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.
+
+This call originates from:
+  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/attention_backend/trtllm.py", line 1976, in forward
+    if get_sm_version() == 90:
+
+  torch._dynamo.utils.warn_once(msg)
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:2152: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at 'trtllm.py:538'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.
+
+This call originates from:
+  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/attention_backend/trtllm.py", line 538, in run
+    if self.is_sm_version_trtllm_gen_kernel(sm=get_sm_version()):
+
+  torch._dynamo.utils.warn_once(msg)
+[TRT-LLM] [W] [thop    ] [RANK 0] Attention workspace size is not enough, increase the size from 0 bytes to 613653248 bytes
+/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/attention_backend/trtllm.py:1198: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.detach().clone() or sourceTensor.detach().clone().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  prompt_lens = torch.tensor(
+[05/09/2026-05:52:58] [TRT-LLM] [I] [_torch  ] Step 1/4 | 5.05s (trans=5.03s cfg=0.000s sched=0.022s) | Avg=5.05s/step ETA=15.2s
+[05/09/2026-05:53:00] [TRT-LLM] [I] [_torch  ] Step 2/4 | 1.39s (trans=0.33s cfg=0.000s sched=1.058s) | Avg=3.22s/step ETA=6.4s
+[05/09/2026-05:53:00] [TRT-LLM] [I] [_torch  ] Switched to transformer_2 (low-noise) at timestep 750.0
+/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/attention_backend/trtllm.py:1198: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.detach().clone() or sourceTensor.detach().clone().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  prompt_lens = torch.tensor(
+[05/09/2026-05:53:01] [TRT-LLM] [I] [_torch  ] Step 3/4 | 1.28s (trans=0.28s cfg=0.000s sched=0.997s) | Avg=2.57s/step ETA=2.6s
+[05/09/2026-05:53:02] [TRT-LLM] [I] [_torch  ] Step 4/4 | 1.14s (trans=0.06s cfg=0.010s sched=1.070s) | Avg=2.22s/step ETA=0.0s
+[05/09/2026-05:53:02] [TRT-LLM] [I] [_torch  ] ================================================================================
+[05/09/2026-05:53:02] [TRT-LLM] [I] [_torch  ] Denoising done: 8.86s (2.22s/step)
+[05/09/2026-05:53:02] [TRT-LLM] [I] [_torch  ] Decoding video...
+[05/09/2026-05:53:03] [TRT-LLM] [I] [_torch  ] Video decoded in 0.86s
+[05/09/2026-05:53:03] [TRT-LLM] [I] [_torch  ] Total pipeline time: 10.06s
+[05/09/2026-05:53:03] [TRT-LLM] [I] [_torch  ] Warmup: 480x832, 81 frames, 4 steps
+[05/09/2026-05:53:03] [TRT-LLM] [I] [_torch  ] Running Wan 2.2 T2V inference(boundary_ratio=0.875, has_transformer_2=True)
+[05/09/2026-05:53:03] [TRT-LLM] [I] [_torch  ] Encoding prompts...
+[05/09/2026-05:53:03] [TRT-LLM] [I] [_torch  ] Prompt encoding completed in 0.05s
+[05/09/2026-05:53:03] [TRT-LLM] [I] [_torch  ] Wan2.2 two-stage denoising: boundary_timestep=875.0, guidance_scale=5.0, guidance_scale_2=5.0
+[05/09/2026-05:53:03] [TRT-LLM] [I] [_torch  ] Denoising: 4 steps, guidance=5.0
+[05/09/2026-05:53:03] [TRT-LLM] [I] [_torch  ] Switched to transformer (high-noise) at timestep 999.0
+/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/attention_backend/trtllm.py:1198: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.detach().clone() or sourceTensor.detach().clone().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  prompt_lens = torch.tensor(
+[TRT-LLM] [W] [thop    ] [RANK 0] Attention workspace size is not enough, increase the size from 0 bytes to 1387088640 bytes
+/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/attention_backend/trtllm.py:1198: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.detach().clone() or sourceTensor.detach().clone().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  prompt_lens = torch.tensor(
+/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/attention_backend/trtllm.py:1198: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.detach().clone() or sourceTensor.detach().clone().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  prompt_lens = torch.tensor(
+[05/09/2026-05:53:12] [TRT-LLM] [I] [_torch  ] Step 1/4 | 8.42s (trans=8.42s cfg=0.000s sched=0.001s) | Avg=8.42s/step ETA=25.3s
+[05/09/2026-05:53:15] [TRT-LLM] [I] [_torch  ] Step 2/4 | 3.88s (trans=0.40s cfg=0.053s sched=3.424s) | Avg=6.15s/step ETA=12.3s
+[05/09/2026-05:53:15] [TRT-LLM] [I] [_torch  ] Switched to transformer_2 (low-noise) at timestep 750.0
+[05/09/2026-05:53:19] [TRT-LLM] [I] [_torch  ] Step 3/4 | 3.83s (trans=0.68s cfg=0.001s sched=3.147s) | Avg=5.38s/step ETA=5.4s
+[05/09/2026-05:53:23] [TRT-LLM] [I] [_torch  ] Step 4/4 | 3.61s (trans=0.19s cfg=0.044s sched=3.377s) | Avg=4.94s/step ETA=0.0s
+[05/09/2026-05:53:23] [TRT-LLM] [I] [_torch  ] ================================================================================
+[05/09/2026-05:53:23] [TRT-LLM] [I] [_torch  ] Denoising done: 19.74s (4.94s/step)
+[05/09/2026-05:53:23] [TRT-LLM] [I] [_torch  ] Decoding video...
+[05/09/2026-05:53:24] [TRT-LLM] [I] [_torch  ] Video decoded in 1.56s
+[05/09/2026-05:53:24] [TRT-LLM] [I] [_torch  ] Total pipeline time: 21.35s
+[05/09/2026-05:53:24] [TRT-LLM] [I] [_torch  ] Warmup: 720x1280, 33 frames, 4 steps
+[05/09/2026-05:53:24] [TRT-LLM] [I] [_torch  ] Running Wan 2.2 T2V inference(boundary_ratio=0.875, has_transformer_2=True)
+[05/09/2026-05:53:24] [TRT-LLM] [I] [_torch  ] Encoding prompts...
+[05/09/2026-05:53:24] [TRT-LLM] [I] [_torch  ] Prompt encoding completed in 0.05s
+[05/09/2026-05:53:24] [TRT-LLM] [I] [_torch  ] Wan2.2 two-stage denoising: boundary_timestep=875.0, guidance_scale=5.0, guidance_scale_2=5.0
+[05/09/2026-05:53:24] [TRT-LLM] [I] [_torch  ] Denoising: 4 steps, guidance=5.0
+[05/09/2026-05:53:24] [TRT-LLM] [I] [_torch  ] Switched to transformer (high-noise) at timestep 999.0
+[05/09/2026-05:53:29] [TRT-LLM] [I] [_torch  ] Step 1/4 | 4.07s (trans=4.07s cfg=0.000s sched=0.001s) | Avg=4.07s/step ETA=12.2s
+[05/09/2026-05:53:32] [TRT-LLM] [I] [_torch  ] Step 2/4 | 3.65s (trans=0.22s cfg=0.051s sched=3.373s) | Avg=3.86s/step ETA=7.7s
+[05/09/2026-05:53:32] [TRT-LLM] [I] [_torch  ] Switched to transformer_2 (low-noise) at timestep 750.0
+[05/09/2026-05:53:36] [TRT-LLM] [I] [_torch  ] Step 3/4 | 3.65s (trans=0.58s cfg=0.002s sched=3.075s) | Avg=3.79s/step ETA=3.8s
+[05/09/2026-05:53:40] [TRT-LLM] [I] [_torch  ] Step 4/4 | 3.65s (trans=0.19s cfg=0.045s sched=3.423s) | Avg=3.76s/step ETA=0.0s
+[05/09/2026-05:53:40] [TRT-LLM] [I] [_torch  ] ================================================================================
+[05/09/2026-05:53:40] [TRT-LLM] [I] [_torch  ] Denoising done: 15.03s (3.76s/step)
+[05/09/2026-05:53:40] [TRT-LLM] [I] [_torch  ] Decoding video...
+[05/09/2026-05:53:41] [TRT-LLM] [I] [_torch  ] Video decoded in 1.63s
+[05/09/2026-05:53:41] [TRT-LLM] [I] [_torch  ] Total pipeline time: 16.71s
+[05/09/2026-05:53:41] [TRT-LLM] [I] [_torch  ] Warmup: 720x1280, 81 frames, 4 steps
+[05/09/2026-05:53:41] [TRT-LLM] [I] [_torch  ] Running Wan 2.2 T2V inference(boundary_ratio=0.875, has_transformer_2=True)
+[05/09/2026-05:53:41] [TRT-LLM] [I] [_torch  ] Encoding prompts...
+[05/09/2026-05:53:41] [TRT-LLM] [I] [_torch  ] Prompt encoding completed in 0.05s
+[05/09/2026-05:53:41] [TRT-LLM] [I] [_torch  ] Wan2.2 two-stage denoising: boundary_timestep=875.0, guidance_scale=5.0, guidance_scale_2=5.0
+[05/09/2026-05:53:41] [TRT-LLM] [I] [_torch  ] Denoising: 4 steps, guidance=5.0
+[05/09/2026-05:53:41] [TRT-LLM] [I] [_torch  ] Switched to transformer (high-noise) at timestep 999.0
+[TRT-LLM] [W] [thop    ] [RANK 0] Attention workspace size is not enough, increase the size from 0 bytes to 3157065984 bytes
+[05/09/2026-05:53:54] [TRT-LLM] [I] [_torch  ] Step 1/4 | 13.11s (trans=13.11s cfg=0.000s sched=0.001s) | Avg=13.11s/step ETA=39.3s
+[05/09/2026-05:54:06] [TRT-LLM] [I] [_torch  ] Step 2/4 | 11.79s (trans=0.82s cfg=0.000s sched=10.971s) | Avg=12.45s/step ETA=24.9s
+[05/09/2026-05:54:06] [TRT-LLM] [I] [_torch  ] Switched to transformer_2 (low-noise) at timestep 750.0
+[05/09/2026-05:54:18] [TRT-LLM] [I] [_torch  ] Step 3/4 | 11.89s (trans=1.83s cfg=0.001s sched=10.061s) | Avg=12.26s/step ETA=12.3s
+[05/09/2026-05:54:30] [TRT-LLM] [I] [_torch  ] Step 4/4 | 12.21s (trans=0.81s cfg=0.000s sched=11.397s) | Avg=12.25s/step ETA=0.0s
+[05/09/2026-05:54:30] [TRT-LLM] [I] [_torch  ] ================================================================================
+[05/09/2026-05:54:30] [TRT-LLM] [I] [_torch  ] Denoising done: 49.00s (12.25s/step)
+[05/09/2026-05:54:30] [TRT-LLM] [I] [_torch  ] Decoding video...
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Video decoded in 3.53s
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Total pipeline time: 52.58s
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Warmup completed in 101.11s
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] [Autotuner] Autotuning process ends
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Warmup completed in 101.19s
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Pipeline loaded: WanPipeline (total load time: 119.63s)
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Worker 0: Pipeline ready
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Worker 0: Sending READY
+[05/09/2026-05:54:34] [TRT-LLM] [I] [vis_gen ] DiffusionClient: Received READY signal
+[05/09/2026-05:54:34] [TRT-LLM] [I] [vis_gen ] DiffusionClient: Workers ready (133.6s)
+[wan-eval/TRTLLM] init=133.59s
+[05/09/2026-05:54:34] [TRT-LLM] [I] [vis_gen ] DiffusionClient: Sending request 0
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Worker 0: Request available
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Worker 0: Processing request 0
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Running Wan 2.2 T2V inference(boundary_ratio=0.875, has_transformer_2=True)
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Encoding prompts...
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Prompt encoding completed in 0.05s
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Wan2.2 two-stage denoising: boundary_timestep=875.0, guidance_scale=4.0, guidance_scale_2=4.0
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Denoising: 40 steps, guidance=4.0
+[05/09/2026-05:54:34] [TRT-LLM] [I] [_torch  ] Switched to transformer (high-noise) at timestep 999.0
+[05/09/2026-05:54:47] [TRT-LLM] [I] [_torch  ] Step 1/40 | 12.48s (trans=0.88s cfg=0.000s sched=11.597s) | Avg=12.48s/step ETA=486.7s
+[05/09/2026-05:54:59] [TRT-LLM] [I] [_torch  ] Step 2/40 | 11.93s (trans=0.81s cfg=0.000s sched=11.120s) | Avg=12.21s/step ETA=463.8s
+[05/09/2026-05:55:10] [TRT-LLM] [I] [_torch  ] Step 3/40 | 11.86s (trans=0.82s cfg=0.000s sched=11.039s) | Avg=12.09s/step ETA=447.3s
+[05/09/2026-05:55:23] [TRT-LLM] [I] [_torch  ] Step 4/40 | 12.36s (trans=0.85s cfg=0.000s sched=11.514s) | Avg=12.16s/step ETA=437.7s
+[05/09/2026-05:55:36] [TRT-LLM] [I] [_torch  ] Step 5/40 | 13.10s (trans=0.93s cfg=0.000s sched=12.168s) | Avg=12.35s/step ETA=432.1s
+[05/09/2026-05:55:49] [TRT-LLM] [I] [_torch  ] Step 6/40 | 13.29s (trans=0.89s cfg=0.000s sched=12.398s) | Avg=12.50s/step ETA=425.1s
+[05/09/2026-05:56:02] [TRT-LLM] [I] [_torch  ] Step 7/40 | 13.07s (trans=0.89s cfg=0.000s sched=12.179s) | Avg=12.59s/step ETA=415.3s
+[05/09/2026-05:56:15] [TRT-LLM] [I] [_torch  ] Step 8/40 | 13.03s (trans=0.93s cfg=0.000s sched=12.101s) | Avg=12.64s/step ETA=404.5s
+[05/09/2026-05:56:28] [TRT-LLM] [I] [_torch  ] Step 9/40 | 12.90s (trans=0.92s cfg=0.000s sched=11.977s) | Avg=12.67s/step ETA=392.8s
+[05/09/2026-05:56:40] [TRT-LLM] [I] [_torch  ] Step 10/40 | 11.89s (trans=0.82s cfg=0.000s sched=11.070s) | Avg=12.59s/step ETA=377.7s
+[05/09/2026-05:56:52] [TRT-LLM] [I] [_torch  ] Step 11/40 | 11.91s (trans=0.82s cfg=0.000s sched=11.082s) | Avg=12.53s/step ETA=363.3s
+[05/09/2026-05:57:04] [TRT-LLM] [I] [_torch  ] Step 12/40 | 11.97s (trans=0.81s cfg=0.000s sched=11.163s) | Avg=12.48s/step ETA=349.5s
+[05/09/2026-05:57:16] [TRT-LLM] [I] [_torch  ] Step 13/40 | 11.88s (trans=0.82s cfg=0.000s sched=11.064s) | Avg=12.44s/step ETA=335.8s
+[05/09/2026-05:57:16] [TRT-LLM] [I] [_torch  ] Switched to transformer_2 (low-noise) at timestep 861.0
+[05/09/2026-05:57:29] [TRT-LLM] [I] [_torch  ] Step 14/40 | 12.95s (trans=0.87s cfg=0.000s sched=12.080s) | Avg=12.47s/step ETA=324.3s
+[05/09/2026-05:57:42] [TRT-LLM] [I] [_torch  ] Step 15/40 | 12.96s (trans=0.92s cfg=0.000s sched=12.041s) | Avg=12.51s/step ETA=312.7s
+[05/09/2026-05:57:55] [TRT-LLM] [I] [_torch  ] Step 16/40 | 12.93s (trans=0.88s cfg=0.000s sched=12.052s) | Avg=12.53s/step ETA=300.8s
+[05/09/2026-05:58:08] [TRT-LLM] [I] [_torch  ] Step 17/40 | 12.83s (trans=0.86s cfg=0.000s sched=11.965s) | Avg=12.55s/step ETA=288.7s
+[05/09/2026-05:58:20] [TRT-LLM] [I] [_torch  ] Step 18/40 | 12.94s (trans=0.92s cfg=0.000s sched=12.018s) | Avg=12.57s/step ETA=276.6s
+[05/09/2026-05:58:32] [TRT-LLM] [I] [_torch  ] Step 19/40 | 11.66s (trans=0.91s cfg=0.000s sched=10.749s) | Avg=12.52s/step ETA=263.0s
+[05/09/2026-05:58:42] [TRT-LLM] [I] [_torch  ] Step 20/40 | 10.01s (trans=0.69s cfg=0.000s sched=9.321s) | Avg=12.40s/step ETA=248.0s
+[05/09/2026-05:58:52] [TRT-LLM] [I] [_torch  ] Step 21/40 | 10.03s (trans=0.69s cfg=0.000s sched=9.341s) | Avg=12.29s/step ETA=233.4s
+[05/09/2026-05:59:02] [TRT-LLM] [I] [_torch  ] Step 22/40 | 10.01s (trans=0.71s cfg=0.000s sched=9.297s) | Avg=12.18s/step ETA=219.3s
+[05/09/2026-05:59:12] [TRT-LLM] [I] [_torch  ] Step 23/40 | 10.06s (trans=0.69s cfg=0.000s sched=9.373s) | Avg=12.09s/step ETA=205.5s
+[05/09/2026-05:59:22] [TRT-LLM] [I] [_torch  ] Step 24/40 | 10.02s (trans=0.71s cfg=0.000s sched=9.303s) | Avg=12.00s/step ETA=192.1s
+[05/09/2026-05:59:32] [TRT-LLM] [I] [_torch  ] Step 25/40 | 10.01s (trans=0.70s cfg=0.000s sched=9.312s) | Avg=11.92s/step ETA=178.9s
+[05/09/2026-05:59:42] [TRT-LLM] [I] [_torch  ] Step 26/40 | 10.01s (trans=0.70s cfg=0.000s sched=9.311s) | Avg=11.85s/step ETA=165.9s
+[05/09/2026-05:59:52] [TRT-LLM] [I] [_torch  ] Step 27/40 | 10.05s (trans=0.72s cfg=0.000s sched=9.329s) | Avg=11.78s/step ETA=153.2s
+[05/09/2026-06:00:02] [TRT-LLM] [I] [_torch  ] Step 28/40 | 10.00s (trans=0.69s cfg=0.000s sched=9.314s) | Avg=11.72s/step ETA=140.6s
+[05/09/2026-06:00:12] [TRT-LLM] [I] [_torch  ] Step 29/40 | 10.00s (trans=0.68s cfg=0.000s sched=9.317s) | Avg=11.66s/step ETA=128.3s
+[05/09/2026-06:00:22] [TRT-LLM] [I] [_torch  ] Step 30/40 | 9.98s (trans=0.68s cfg=0.000s sched=9.297s) | Avg=11.60s/step ETA=116.0s
+[05/09/2026-06:00:32] [TRT-LLM] [I] [_torch  ] Step 31/40 | 10.02s (trans=0.69s cfg=0.000s sched=9.330s) | Avg=11.55s/step ETA=104.0s
+[05/09/2026-06:00:42] [TRT-LLM] [I] [_torch  ] Step 32/40 | 9.99s (trans=0.68s cfg=0.000s sched=9.315s) | Avg=11.50s/step ETA=92.0s
+[05/09/2026-06:00:52] [TRT-LLM] [I] [_torch  ] Step 33/40 | 9.97s (trans=0.70s cfg=0.000s sched=9.267s) | Avg=11.46s/step ETA=80.2s
+[05/09/2026-06:01:02] [TRT-LLM] [I] [_torch  ] Step 34/40 | 10.19s (trans=0.70s cfg=0.000s sched=9.490s) | Avg=11.42s/step ETA=68.5s
+[05/09/2026-06:01:13] [TRT-LLM] [I] [_torch  ] Step 35/40 | 10.34s (trans=0.68s cfg=0.000s sched=9.655s) | Avg=11.39s/step ETA=56.9s
+[05/09/2026-06:01:23] [TRT-LLM] [I] [_torch  ] Step 36/40 | 10.01s (trans=0.69s cfg=0.000s sched=9.314s) | Avg=11.35s/step ETA=45.4s
+[05/09/2026-06:01:33] [TRT-LLM] [I] [_torch  ] Step 37/40 | 10.41s (trans=0.68s cfg=0.000s sched=9.729s) | Avg=11.33s/step ETA=34.0s
+[05/09/2026-06:01:45] [TRT-LLM] [I] [_torch  ] Step 38/40 | 11.33s (trans=0.86s cfg=0.000s sched=10.468s) | Avg=11.33s/step ETA=22.7s
+[05/09/2026-06:01:55] [TRT-LLM] [I] [_torch  ] Step 39/40 | 10.00s (trans=0.68s cfg=0.000s sched=9.320s) | Avg=11.29s/step ETA=11.3s
+[05/09/2026-06:02:05] [TRT-LLM] [I] [_torch  ] Step 40/40 | 9.94s (trans=0.68s cfg=0.000s sched=9.260s) | Avg=11.26s/step ETA=0.0s
+[05/09/2026-06:02:05] [TRT-LLM] [I] [_torch  ] ================================================================================
+[05/09/2026-06:02:05] [TRT-LLM] [I] [_torch  ] Denoising done: 450.34s (11.26s/step)
+[05/09/2026-06:02:05] [TRT-LLM] [I] [_torch  ] Decoding video...
+[05/09/2026-06:02:07] [TRT-LLM] [I] [_torch  ] Video decoded in 2.67s
+[05/09/2026-06:02:07] [TRT-LLM] [I] [_torch  ] Total pipeline time: 453.06s
+[wan-eval/TRTLLM] generate=454.91s
+[wan-eval/TRTLLM] video shape=(81, 720, 1280, 3) dtype=uint8
+Multiple -pix_fmt options specified for stream 0, only the last option '-pix_fmt yuv420p' will be used.
+[wan-eval/TRTLLM] wrote /home/liuc/scratch/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/videos/panda_bamboo_TRTLLM_sage_blk16.mp4
+[05/09/2026-06:02:14] [TRT-LLM] [I] [vis_gen ] VisualGen: Shutting down
+[05/09/2026-06:02:14] [TRT-LLM] [I] [vis_gen ] DiffusionClient: Shutting down
+[05/09/2026-06:02:14] [TRT-LLM] [I] [vis_gen ] DiffusionClient: Sending shutdown signal
+[05/09/2026-06:02:14] [TRT-LLM] [I] [_torch  ] Worker 0: Request available
+[05/09/2026-06:02:14] [TRT-LLM] [I] [_torch  ] Worker 0: Shutdown signal received
+[05/09/2026-06:02:14] [TRT-LLM] [I] [vis_gen ] DiffusionClient: Cleaning up IPC
+[05/09/2026-06:02:14] [TRT-LLM] [I] [vis_gen ] DiffusionClient: Background thread stopped
+[05/09/2026-06:02:14] [TRT-LLM] [I] [vis_gen ] DiffusionClient: Stopping workers
+[05/09/2026-06:02:16] [TRT-LLM] [W] [vis_gen ] DiffusionClient: Terminating worker 44888 with SIGTERM
