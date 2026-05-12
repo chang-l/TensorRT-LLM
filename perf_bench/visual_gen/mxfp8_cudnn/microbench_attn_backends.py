@@ -57,8 +57,8 @@ def parse_args():
     p.add_argument("--batch", type=int, default=1)
     p.add_argument("--heads", type=int, default=40)
     p.add_argument("--dim", type=int, default=128)
-    p.add_argument("--warmup", type=int, default=5)
-    p.add_argument("--iters", type=int, default=20)
+    p.add_argument("--warmup", type=int, default=10)
+    p.add_argument("--iters", type=int, default=50)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out", default="microbench_attn_backends.json")
     p.add_argument(
@@ -96,6 +96,21 @@ def percentile(vals, q):
     f = int(k)
     c = min(f + 1, len(vals) - 1)
     return vals[f] + (vals[c] - vals[f]) * (k - f)
+
+
+def attn_flops(B, H, S, D):
+    """Theoretical FLOPS for one non-causal SDPA call.
+
+    Two matmuls dominate: QK^T (B*H*S*S*D mul-adds) and AV (B*H*S*S*D mul-adds).
+    Counting one mul-add as 2 flops: total = 4 * B * H * S^2 * D.
+    Softmax (~5 * B*H*S^2 flops) is excluded by convention.
+    """
+    return 4 * B * H * S * S * D
+
+
+def tflops(B, H, S, D, latency_ms):
+    """Achieved TFLOPS for a single attention call given median latency in ms."""
+    return attn_flops(B, H, S, D) / (latency_ms * 1e-3) / 1e12
 
 
 def bench_vanilla(B, H, S, D, q_nhd, k_nhd, v_nhd, warmup, iters):
@@ -207,10 +222,12 @@ def main():
             med = percentile(ts, 0.5)
             results_this_shape[backend] = med
             spk = (results_this_shape["VANILLA"] / med) if "VANILLA" in results_this_shape else None
+            achieved_tflops = tflops(B, H, S, D, med)
             print(
                 f"  [{PRETTY[backend]:<32}] "
                 f"med={med:7.3f}ms min={min(ts):7.3f} "
-                f"p10={percentile(ts, 0.10):7.3f} p90={percentile(ts, 0.90):7.3f}"
+                f"p10={percentile(ts, 0.10):7.3f} p90={percentile(ts, 0.90):7.3f} "
+                f"TFLOPS={achieved_tflops:6.1f}"
                 + (f"  speedup={spk:.2f}x" if spk is not None else "")
             )
             rows.append(
@@ -226,6 +243,8 @@ def main():
                     "iters": args.iters,
                     "warmup": args.warmup,
                     "speedup_vs_vanilla": spk,
+                    "tflops_achieved": achieved_tflops,
+                    "flops_per_call": attn_flops(B, H, S, D),
                 }
             )
         print()

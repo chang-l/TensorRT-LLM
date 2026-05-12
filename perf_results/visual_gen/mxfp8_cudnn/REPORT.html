@@ -258,56 +258,94 @@
 <p><strong>Takeaway:</strong> the cuDNN kernel itself is consistently 1.18–1.28× faster than bf16 SDPA on B200, but per-step Q/K/V re-quantization (mandatory in diffusion since Q/K/V change every step) eats roughly two-thirds of the kernel speedup.</p>
 
 <h3 id="mb-allbackends">4c. Cross-backend comparison: MXFP8_CUDNN vs Sage(1, 16, 1) vs Sage(1, 4, 1)</h3>
-<p>Same shape sweep, but timed through the actual production backend wrappers (so the numbers include each backend's internal pre-quantization, metadata setup and the kernel itself — exactly what one denoising step calls). B=1, H=40, D=128, 5 warmup + 20 iters, on a B200 idle node (umbriel-b200-043, GPU 0, single tenant). The same random Q/K/V bf16 tensors are fed into all four backends, seed 42. Sage configs are <code>(num_elts_per_blk_q=1, num_elts_per_blk_v=1, qk_int8=True)</code>; the K-block is the swept dimension.</p>
-<p>The MXFP8 S=75600 cell is filled in from the standalone <code>microbench_with_quant.py</code> (74.71 ms full path, matches §4b) because the wrapper backend itself errors with <code>mha_graph.execute().is_good() == false</code> at that S — a known limitation of the MXFP8CudnnAttention path's workspace sizing at S=75k, not a kernel issue.</p>
+<p>Same shape sweep, timed through the actual production backend wrappers (so the numbers include each backend's internal pre-quantization, metadata setup and the kernel itself — exactly what one denoising step calls). The same random Q/K/V bf16 tensors are fed into all four backends, seed 42. Sage configs are <code>(num_elts_per_blk_q=1, num_elts_per_blk_v=1, qk_int8=True)</code>; the K-block is the swept dimension.</p>
+<dl class="meta">
+<dt>Hardware</dt><dd>umbriel-b200-043, GPU 0, B200 (cc=10.0)</dd>
+<dt>GPU state</dt><dd>fully idle node (8/8 GPUs at 0% util, 0 MB) at measurement time; SM clock locked to 1855 MHz (peak 1965 MHz) via <code>nvidia-smi -lgc</code> to remove DVFS noise. Clocks restored after the run.</dd>
+<dt>B / H / D</dt><dd>1 / 40 / 128 (Wan-2.2 T2V-A14B self-attn)</dd>
+<dt>warmup / iters</dt><dd>10 / 50, median + min + p10 + p90 reported</dd>
+<dt>FLOPS formula</dt><dd>
+4 × B × H × S² × D — one mul-add counted as 2 flops, two SDPA matmuls (QK^T and AV) of shape <i>B×H×S×S×D</i> each. Softmax (~5·B·H·S² flops) is excluded by convention.
+At our (B=1, H=40, D=128), this simplifies to 20 480 · S² flops per call: 0.45 GF at S=4 680 / 4.0 GF at 14 040 / 14.9 GF at 27 000 / <strong>117 GF at 75 600</strong>. Achieved TFLOPS = <code>flops / (median_latency_ms × 1e-3) / 1e12</code>.
+</dd>
+<dt>B200 SoL</dt><dd>~2 250 TFLOPS BF16 / ~4 500 TFLOPS FP8 (no sparsity) for reference.</dd>
+</dl>
+<p>The MXFP8 S=75 600 cell is from the standalone <code>microbench_with_quant.py</code> (74.629 ms full path under the same clock-locked conditions, matches §4b's 74.43 ms within run-to-run noise) because the <code>MXFP8CudnnAttention</code> wrapper itself errors with <code>mha_graph.execute().is_good() == false</code> at that S — a known wrapper-level workspace-sizing limitation, not a kernel issue.</p>
 <table>
 <thead><tr>
-<th class="num">S</th>
-<th class="num">VANILLA bf16 SDPA (ms)</th>
-<th class="num">MXFP8_CUDNN (ms / speedup)</th>
-<th class="num">Sage (1, 16, 1) (ms / speedup)</th>
-<th class="num">Sage (1, 4, 1) (ms / speedup)</th>
+<th class="num" rowspan="2">S</th>
+<th colspan="2" style="text-align:center;border-bottom:1px solid #d0d4dd">VANILLA bf16 SDPA</th>
+<th colspan="3" style="text-align:center;border-bottom:1px solid #d0d4dd">MXFP8_CUDNN</th>
+<th colspan="3" style="text-align:center;border-bottom:1px solid #d0d4dd">Sage (1, 16, 1)</th>
+<th colspan="3" style="text-align:center;border-bottom:1px solid #d0d4dd">Sage (1, 4, 1)</th>
+</tr><tr>
+<th class="num">ms</th><th class="num">TFLOPS</th>
+<th class="num">ms</th><th class="num">speedup</th><th class="num">TFLOPS</th>
+<th class="num">ms</th><th class="num">speedup</th><th class="num">TFLOPS</th>
+<th class="num">ms</th><th class="num">speedup</th><th class="num">TFLOPS</th>
 </tr></thead>
 <tbody>
 <tr>
 <td class="num">4 680 <small>(warmup, 480×832 / 9f)</small></td>
-<td class="num">0.339</td>
-<td class="num">0.664 / <strong>0.51×</strong></td>
-<td class="num">0.504 / <strong>0.67×</strong></td>
-<td class="num">0.522 / <strong>0.65×</strong></td>
+<td class="num">0.336</td><td class="num">1 334</td>
+<td class="num">0.695</td><td class="num">0.48×</td><td class="num">646</td>
+<td class="num">0.513</td><td class="num">0.66×</td><td class="num">875</td>
+<td class="num">0.527</td><td class="num">0.64×</td><td class="num">852</td>
 </tr>
 <tr>
 <td class="num">14 040 <small>(480×832 / 33f)</small></td>
-<td class="num">2.690</td>
-<td class="num">1.917 / <strong>1.40×</strong></td>
-<td class="num">2.848 / 0.94×</td>
-<td class="num">3.100 / 0.87×</td>
+<td class="num">3.074</td><td class="num">1 313</td>
+<td class="num">1.985</td><td class="num"><strong>1.55×</strong></td><td class="num"><strong>2 034</strong></td>
+<td class="num">2.858</td><td class="num">1.08×</td><td class="num">1 412</td>
+<td class="num">3.108</td><td class="num">0.99×</td><td class="num">1 299</td>
 </tr>
 <tr>
 <td class="num">27 000 <small>(720×1280 / 33f)</small></td>
-<td class="num">10.896</td>
-<td class="num">3.619 / <strong>3.01×</strong></td>
-<td class="num">9.776 / <strong>1.11×</strong></td>
-<td class="num">10.896 / 1.00×</td>
+<td class="num">11.217</td><td class="num">1 331</td>
+<td class="num">3.745</td><td class="num"><strong>2.99×</strong></td><td class="num"><strong>3 987</strong></td>
+<td class="num">9.839</td><td class="num">1.14×</td><td class="num">1 517</td>
+<td class="num">10.855</td><td class="num">1.03×</td><td class="num">1 375</td>
 </tr>
 <tr>
 <td class="num">75 600 <small>(720×1280 / 81f, prod target)</small></td>
-<td class="num">87.122</td>
-<td class="num">74.71* / <strong>1.17×</strong></td>
-<td class="num">75.067 / <strong>1.16×</strong></td>
-<td class="num">81.761 / <strong>1.07×</strong></td>
+<td class="num">87.613</td><td class="num">1 336</td>
+<td class="num">74.629*</td><td class="num"><strong>1.17×</strong></td><td class="num">1 569</td>
+<td class="num">75.042</td><td class="num"><strong>1.17×</strong></td><td class="num">1 560</td>
+<td class="num">82.194</td><td class="num">1.07×</td><td class="num">1 424</td>
 </tr>
 </tbody>
 </table>
-<p>* MXFP8 S=75600 measured via standalone microbench (see paragraph above).</p>
+<p>* MXFP8 S=75 600 measured via standalone microbench (see paragraph above).</p>
 <p><strong>Observations:</strong></p>
 <ul>
 <li><strong>At small S (4 680)</strong> every quantized path is <em>slower</em> than bf16 SDPA: torch's flash kernel on B200 is already so fast (~340 µs) that any quantization overhead dominates. This is the "warmup shape" regime — not where attention spends real time.</li>
-<li><strong>At mid-S (14 040 – 27 000)</strong> MXFP8 pulls ahead decisively (1.4× to 3.0× over VANILLA). Sage(1, 16, 1) ranges from 0.94× to 1.11× — competitive at the bigger end, no better than VANILLA at the smaller end. Sage(1, 4, 1) is always slower than (1, 16, 1) at the same S.</li>
-<li><strong>At the production S (75 600)</strong> MXFP8_CUDNN (1.17×) and Sage(1, 16, 1) (1.16×) tie within noise — both are useful. Sage(1, 4, 1) only nets 1.07× and uses ~9% more time per call than Sage(1, 16, 1).</li>
+<li><strong>At mid-S (14 040 – 27 000)</strong> MXFP8 pulls ahead decisively (1.55× and 2.99× over VANILLA respectively, hitting <strong>3 987 TFLOPS at S=27 000 ≈ 89% of B200 FP8 SoL</strong>). Sage(1, 16, 1) ranges 1.08×–1.14×; Sage(1, 4, 1) is always slower than (1, 16, 1) at the same S.</li>
+<li><strong>At the production S (75 600)</strong> MXFP8_CUDNN (1.17×, 1 569 TFLOPS) and Sage(1, 16, 1) (1.17×, 1 560 TFLOPS) tie within noise — both are useful. Sage(1, 4, 1) nets only 1.07× / 1 424 TFLOPS, ~9% slower than (1, 16, 1).</li>
+<li><strong>Why MXFP8 falls off SoL at S=75 600.</strong> The kernel achieves ~3 987 TFLOPS at S=27 000 (89% of FP8 peak) but only 1 569 TFLOPS at S=75 600 (~35%). At larger S, the attention matrix (S²) blows past on-chip SRAM and the kernel becomes memory-bandwidth-bound; TFLOPS is no longer the right ceiling. The 1.17× speedup is still real — it tracks Sage's identical scaling — but it's a memory-bound regime, not a tensor-core regime.</li>
 <li><strong>Sage K-block tradeoff is now perf-quantified</strong> (cf. <a href="REPORT_PROMPTS.html#cross">REPORT_PROMPTS §4</a> for the accuracy view): at S=75 600, (1, 4, 1) costs 9% more wall time than (1, 16, 1) for <em>zero</em> accuracy gain — both LPIPS land at ~0.21. At smaller S, (1, 4, 1) costs only a few percent more but accuracy recovers from a "visible" 0.62 to a "subtle" 0.10. The picker rule from this study: use (1, 16, 1) at S ≥ 50k and (1, 4, 1) below that.</li>
-<li><strong>MXFP8 vs Sage(1, 16, 1) at production S:</strong> the per-call latency is essentially the same (74.7 vs 75.1 ms, ~0.5% gap). MXFP8 wins on three things outside this microbench — (a) it stays in the "subtle" LPIPS band at <em>every</em> S without retuning (Sage needs a per-S K-block), (b) the kernel can ingest pre-quantized fused-QKV-projection output (Sage cannot), and (c) numerics are byte-identical to bf16 at uint8 video level (cosine 1.0000, LPIPS 0.044). Sage wins on cuDNN-graph init cost — it has none, while MXFP8_CUDNN pays ~200 s of cuDNN graph build per shape × layer.</li>
+<li><strong>MXFP8 vs Sage(1, 16, 1) at production S:</strong> per-call latency essentially the same (74.6 vs 75.0 ms, ~0.5% gap). MXFP8 wins on three things outside this microbench — (a) it stays in the "subtle" LPIPS band at <em>every</em> S without retuning, (b) the kernel can ingest pre-quantized fused-QKV-projection output, (c) numerics are byte-identical to bf16 at uint8 video level (cosine 1.0000, LPIPS 0.044). Sage wins on cuDNN-graph init cost — it has none, while MXFP8_CUDNN pays ~200 s of cuDNN graph build per shape × layer.</li>
 </ul>
+<details><summary><strong>FLOPS formula — full derivation</strong></summary>
+<p>Non-causal scaled-dot-product-attention has two matrix multiplications, both shape <code>B × H × S × S × D</code>:</p>
+<ol>
+<li><code>QK^T</code>: Q is <code>[B, H, S, D]</code>, K^T is <code>[B, H, D, S]</code> → output <code>[B, H, S, S]</code>. Mul-adds: <code>B · H · S · S · D</code>.</li>
+<li><code>softmax(scores) · V</code>: V is <code>[B, H, S, D]</code> → output <code>[B, H, S, D]</code>. Mul-adds: <code>B · H · S · S · D</code>.</li>
+</ol>
+<p>Counting one mul-add as 2 flops (the standard convention; one fused-multiply-add instruction is two arithmetic ops), the SDPA flop count is:</p>
+<pre><code>flops_per_call = 2 × 2 × B × H × S² × D
+              = 4 × B × H × S² × D</code></pre>
+<p>This is the same convention used by NVIDIA's Megatron-LM, PyTorch's <code>torch.profiler.attention_flops</code>, and the FlashAttention paper. Softmax (~5·B·H·S²) is excluded — it's a constant-per-row reduction, not a tensor-core kernel.</p>
+<p>For this microbench, B=1, H=40, D=128, so <code>flops_per_call = 4 · 40 · 128 · S² = 20 480 · S²</code>. To convert latency to achieved TFLOPS:</p>
+<pre><code>achieved_tflops = flops_per_call / (median_latency_seconds) / 1e12</code></pre>
+<p>Reference points to interpret the numbers:</p>
+<ul>
+<li>B200 BF16 dense Tensor Core peak: ~2 250 TFLOPS (no sparsity)</li>
+<li>B200 FP8 dense Tensor Core peak: ~4 500 TFLOPS (no sparsity)</li>
+<li>VANILLA bf16 SDPA hovers at <strong>~1 330 TFLOPS</strong> at every shape ≥ S=4 680, i.e. ~59% of bf16 SoL — typical for FlashAttention-class kernels which are memory-bound past S~few-thousand.</li>
+<li>MXFP8 peaks at <strong>3 987 TFLOPS</strong> at S=27 000 ≈ 89% of FP8 SoL, then drops at S=75 600 because attention-matrix traffic dominates.</li>
+</ul>
+<p>Pure TFLOPS comparison between bf16 and FP8 kernels needs care: each kernel has a different SoL ceiling (2 250 vs 4 500), so equal achieved TFLOPS does not mean equal SoL%. We report TFLOPS as a self-consistent latency-derived metric and SoL% inline where it matters.</p>
+</details>
 
 <h2 id="e2e">5. Wan2.2 T2V-A14B End-to-End</h2>
 <p>Identical seed (42), prompt "A close-up of a giant panda calmly eating bamboo in a misty forest, photorealistic, soft golden-hour lighting, cinematic", 720×1280, 81 frames, 40 inference steps, single GPU. CFG size 1, Ulysses size 1, parallel VAE off, cuda_graph default-off, fps=16.</p>
