@@ -257,20 +257,19 @@
 </table>
 <p><strong>Takeaway:</strong> the cuDNN kernel itself is consistently 1.18–1.28× faster than bf16 SDPA on B200, but per-step Q/K/V re-quantization (mandatory in diffusion since Q/K/V change every step) eats roughly two-thirds of the kernel speedup.</p>
 
-<h3 id="mb-allbackends">4c. Cross-backend comparison: MXFP8_CUDNN vs Sage(1, 16, 1) vs Sage(1, 4, 1)</h3>
-<p>Same shape sweep, timed through the actual production backend wrappers (so the numbers include each backend's internal pre-quantization, metadata setup and the kernel itself — exactly what one denoising step calls). The same random Q/K/V bf16 tensors are fed into all four backends, seed 42. Sage configs are <code>(num_elts_per_blk_q=1, num_elts_per_blk_v=1, qk_int8=True)</code>; the K-block is the swept dimension.</p>
+<h3 id="mb-allbackends">4c. Cross-backend kernel-only comparison: MXFP8_CUDNN vs Sage(1, 16, 1) vs Sage(1, 4, 1)</h3>
+<p><strong>Timed region is the SDPA kernel only</strong> — for MXFP8, Q/K/V are pre-quantized via TE once outside the timing loop and only <code>graph.execute()</code> is measured (same protocol as §4a). For VANILLA, torch SDPA is kernel-only by construction. For Sage, the int8 Q/K quant is <em>fused inside</em> the kernel itself (there's no separable pre-quant step), and metadata is prepared once during warmup and cached for subsequent calls (same shape), so the wrapper forward time equals kernel time after warmup. All four backends consume the same random bf16 Q/K/V tensors, seed 42. Sage configs: <code>(num_elts_per_blk_q=1, num_elts_per_blk_v=1, qk_int8=True)</code>; K-block is the swept dimension.</p>
 <dl class="meta">
-<dt>Hardware</dt><dd>umbriel-b200-043, GPU 0, B200 (cc=10.0)</dd>
+<dt>Hardware</dt><dd>umbriel-b200-043, GPU 0, NVIDIA B200 (compute capability 10.0 — the "<code>cc=10.0</code>" notation in the script output is PyTorch's <code>torch.cuda.get_device_capability()</code>; cc 10.0 = Blackwell datacenter, distinct from Hopper 9.0, Ampere 8.x, etc.).</dd>
 <dt>GPU state</dt><dd>fully idle node at measurement time (8/8 GPUs at 0% util, 0 MB before launch). Default clocks — no <code>nvidia-smi -lgc</code> applied — boost max 1965 MHz.</dd>
 <dt>B / H / D</dt><dd>1 / 40 / 128 (Wan-2.2 T2V-A14B self-attn)</dd>
 <dt>warmup / iters</dt><dd>10 / 50, median + min + p10 + p90 reported</dd>
 <dt>FLOPS formula</dt><dd>
 4 × B × H × S² × D — one mul-add counted as 2 flops, two SDPA matmuls (QK^T and AV) of shape <i>B×H×S×S×D</i> each. Softmax (~5·B·H·S² flops) is excluded by convention.
-At our (B=1, H=40, D=128), this simplifies to 20 480 · S² flops per call: 0.45 GF at S=4 680 / 4.0 GF at 14 040 / 14.9 GF at 27 000 / <strong>117 GF at 75 600</strong>. Achieved TFLOPS = <code>flops / (median_latency_ms × 1e-3) / 1e12</code>.
+At (B=1, H=40, D=128), this simplifies to 20 480 · S² flops per call: 0.45 GF at S=4 680 / 4.0 GF at 14 040 / 14.9 GF at 27 000 / <strong>117 GF at 75 600</strong>. Achieved TFLOPS = <code>flops / (median_latency_ms × 1e-3) / 1e12</code>.
 </dd>
 <dt>B200 SoL</dt><dd>~2 250 TFLOPS BF16 / ~4 500 TFLOPS FP8 (no sparsity) for reference.</dd>
 </dl>
-<p>The MXFP8 S=75 600 cell is from the standalone <code>microbench_with_quant.py</code> (74.721 ms full path under the same conditions, matches §4b's 74.43 ms within run-to-run noise) because the <code>MXFP8CudnnAttention</code> wrapper itself errors with <code>mha_graph.execute().is_good() == false</code> at that S — a known wrapper-level workspace-sizing limitation, not a kernel issue.</p>
 <table>
 <thead><tr>
 <th class="num" rowspan="2">S</th>
@@ -287,43 +286,43 @@ At our (B=1, H=40, D=128), this simplifies to 20 480 · S² flops per call: 0.45
 <tbody>
 <tr>
 <td class="num">4 680 <small>(warmup, 480×832 / 9f)</small></td>
-<td class="num">0.338</td><td class="num">1 326</td>
-<td class="num">0.666</td><td class="num">0.51×</td><td class="num">674</td>
-<td class="num">0.505</td><td class="num">0.67×</td><td class="num">889</td>
-<td class="num">0.522</td><td class="num">0.65×</td><td class="num">860</td>
+<td class="num">0.338</td><td class="num">1 325</td>
+<td class="num">0.307</td><td class="num"><strong>1.10×</strong></td><td class="num"><strong>1 463</strong></td>
+<td class="num">0.504</td><td class="num">0.67×</td><td class="num">890</td>
+<td class="num">0.521</td><td class="num">0.65×</td><td class="num">861</td>
 </tr>
 <tr>
 <td class="num">14 040 <small>(480×832 / 33f)</small></td>
-<td class="num">3.075</td><td class="num">1 313</td>
-<td class="num">1.917</td><td class="num"><strong>1.60×</strong></td><td class="num"><strong>2 105</strong></td>
-<td class="num">2.847</td><td class="num">1.08×</td><td class="num">1 418</td>
-<td class="num">3.102</td><td class="num">0.99×</td><td class="num">1 301</td>
+<td class="num">3.044</td><td class="num">1 326</td>
+<td class="num">2.381</td><td class="num"><strong>1.28×</strong></td><td class="num"><strong>1 695</strong></td>
+<td class="num">2.865</td><td class="num">1.06×</td><td class="num">1 409</td>
+<td class="num">3.100</td><td class="num">0.98×</td><td class="num">1 302</td>
 </tr>
 <tr>
 <td class="num">27 000 <small>(720×1280 / 33f)</small></td>
-<td class="num">10.979</td><td class="num">1 360</td>
-<td class="num">3.619</td><td class="num"><strong>3.03×</strong></td><td class="num"><strong>4 125</strong></td>
-<td class="num">9.933</td><td class="num">1.11×</td><td class="num">1 503</td>
-<td class="num">10.861</td><td class="num">1.01×</td><td class="num">1 375</td>
+<td class="num">11.139</td><td class="num">1 340</td>
+<td class="num">8.776</td><td class="num"><strong>1.27×</strong></td><td class="num"><strong>1 701</strong></td>
+<td class="num">10.040</td><td class="num">1.11×</td><td class="num">1 487</td>
+<td class="num">10.884</td><td class="num">1.02×</td><td class="num">1 372</td>
 </tr>
 <tr>
 <td class="num">75 600 <small>(720×1280 / 81f, prod target)</small></td>
-<td class="num">87.328</td><td class="num">1 340</td>
-<td class="num">74.721*</td><td class="num"><strong>1.17×</strong></td><td class="num">1 567</td>
-<td class="num">75.452</td><td class="num"><strong>1.16×</strong></td><td class="num">1 551</td>
-<td class="num">82.452</td><td class="num">1.06×</td><td class="num">1 420</td>
+<td class="num">87.423</td><td class="num">1 339</td>
+<td class="num">69.580</td><td class="num"><strong>1.26×</strong></td><td class="num"><strong>1 682</strong></td>
+<td class="num">75.802</td><td class="num">1.15×</td><td class="num">1 544</td>
+<td class="num">82.635</td><td class="num">1.06×</td><td class="num">1 417</td>
 </tr>
 </tbody>
 </table>
-<p>* MXFP8 S=75 600 measured via standalone microbench (see paragraph above).</p>
 <p><strong>Observations:</strong></p>
 <ul>
-<li><strong>At small S (4 680)</strong> every quantized path is <em>slower</em> than bf16 SDPA: torch's flash kernel on B200 is already so fast (~340 µs) that any quantization overhead dominates. This is the "warmup shape" regime — not where attention spends real time.</li>
-<li><strong>At mid-S (14 040 – 27 000)</strong> MXFP8 pulls ahead decisively (1.60× and 3.03× over VANILLA respectively, hitting <strong>4 125 TFLOPS at S=27 000 ≈ 92% of B200 FP8 SoL</strong>). Sage(1, 16, 1) ranges 1.08×–1.11×; Sage(1, 4, 1) is always slower than (1, 16, 1) at the same S.</li>
-<li><strong>At the production S (75 600)</strong> MXFP8_CUDNN (1.17×, 1 567 TFLOPS) and Sage(1, 16, 1) (1.16×, 1 551 TFLOPS) tie within noise — both are useful. Sage(1, 4, 1) nets only 1.06× / 1 420 TFLOPS, ~9% slower than (1, 16, 1).</li>
-<li><strong>Why MXFP8 falls off SoL at S=75 600.</strong> The kernel achieves ~4 125 TFLOPS at S=27 000 (92% of FP8 peak) but only 1 567 TFLOPS at S=75 600 (~35%). At larger S, the attention matrix (S²) blows past on-chip SRAM and the kernel becomes memory-bandwidth-bound; TFLOPS is no longer the right ceiling. The 1.17× speedup is still real — it tracks Sage's identical scaling — but it's a memory-bound regime, not a tensor-core regime.</li>
-<li><strong>Sage K-block tradeoff is now perf-quantified</strong> (cf. <a href="REPORT_PROMPTS.html#cross">REPORT_PROMPTS §4</a> for the accuracy view): at S=75 600, (1, 4, 1) costs 9% more wall time than (1, 16, 1) for <em>zero</em> accuracy gain — both LPIPS land at ~0.21. At smaller S, (1, 4, 1) costs only a few percent more but accuracy recovers from a "visible" 0.62 to a "subtle" 0.10. The picker rule from this study: use (1, 16, 1) at S ≥ 50k and (1, 4, 1) below that.</li>
-<li><strong>MXFP8 vs Sage(1, 16, 1) at production S:</strong> per-call latency essentially the same (74.6 vs 75.0 ms, ~0.5% gap). MXFP8 wins on three things outside this microbench — (a) it stays in the "subtle" LPIPS band at <em>every</em> S without retuning, (b) the kernel can ingest pre-quantized fused-QKV-projection output, (c) numerics are byte-identical to bf16 at uint8 video level (cosine 1.0000, LPIPS 0.044). Sage wins on cuDNN-graph init cost — it has none, while MXFP8_CUDNN pays ~200 s of cuDNN graph build per shape × layer.</li>
+<li><strong>MXFP8 wins at every shape, kernel-only.</strong> Speedup is uniformly 1.10×–1.28× over VANILLA across the four Wan shapes. At S=4 680 the gain is small (1.10×) because the kernel is short enough that fixed launch overhead dominates; at larger S the speedup stabilizes around 1.26×–1.28×.</li>
+<li><strong>MXFP8 is memory-bound at all production shapes.</strong> Achieved TFLOPS for MXFP8 hovers around 1 463–1 701 across S, far below B200's 4 500 TFLOPS FP8 SoL. That's the kernel becoming memory-bandwidth-bound past S~few-thousand: attention reads/writes the S²-sized softmax matrix, and HBM bandwidth caps how fast that can move. The 1.26–1.28× speedup is what FP8 buys here vs bf16 in terms of <em>bytes-moved</em>, not flops/sec.</li>
+<li><strong>Sage(1, 16, 1)</strong> ranges 0.67×–1.15× — slower than VANILLA at the smallest S (the int8 quant overhead inside the kernel doesn't amortize on a 0.5 ms call) and modestly faster at production S (1.15× / 1 544 TFLOPS, comparable to MXFP8's 1.26× / 1 682 TFLOPS).</li>
+<li><strong>Sage(1, 4, 1)</strong> is always slower than (1, 16, 1) at the same S — finer K-block means more scale tensors to read and more per-block normalisation work. Speedup over VANILLA tops out at 1.06× (S=75 600).</li>
+<li><strong>Sage K-block tradeoff is now perf-quantified</strong> (cf. <a href="REPORT_PROMPTS.html#cross">REPORT_PROMPTS §4</a> for the accuracy view): at S=75 600, (1, 4, 1) costs ~9% more wall time than (1, 16, 1) for <em>zero</em> accuracy gain — both LPIPS land at ~0.21. At smaller S (480p/33f), (1, 4, 1) costs only a few percent more but accuracy recovers from a "visible" 0.62 to a "subtle" 0.10. Rule: use (1, 16, 1) at S ≥ 50k and (1, 4, 1) below that.</li>
+<li><strong>MXFP8 vs Sage(1, 16, 1) at production S:</strong> MXFP8 is ~8% faster at the kernel (69.6 vs 75.8 ms = 1.26× vs 1.15× over VANILLA). Outside the kernel, MXFP8 wins on three more things — (a) it stays in the "subtle" LPIPS band at <em>every</em> S without retuning, (b) it can ingest pre-quantized fused-QKV-projection output (Sage cannot), (c) numerics are byte-identical to bf16 at uint8 video level (cosine 1.0000, LPIPS 0.044). Sage wins on cuDNN-graph init cost — it has none, while MXFP8_CUDNN pays ~200 s of cuDNN graph build per shape × layer in the current pipeline. That init cost is the main reason MXFP8 lags Sage end-to-end (cf. §5b: 41% wall slower) despite winning at the kernel.</li>
+<li><strong>What about the realistic full-path cost (kernel + 3× TE quantize)?</strong> §4b answers this for MXFP8 at the production shape: the 3 TE quantize calls add ~6 ms / call at S=75 600 (1.97 + 1.97 + 1.97), pushing 69.6 ms kernel-only → ~74.4 ms full path, dropping the speedup from 1.26× to 1.17×. For Sage the quant is in-kernel so its number above <em>is</em> the full-path number.</li>
 </ul>
 <details><summary><strong>FLOPS formula — full derivation</strong></summary>
 <p>Non-causal scaled-dot-product-attention has two matrix multiplications, both shape <code>B × H × S × S × D</code>:</p>
@@ -342,7 +341,7 @@ At our (B=1, H=40, D=128), this simplifies to 20 480 · S² flops per call: 0.45
 <li>B200 BF16 dense Tensor Core peak: ~2 250 TFLOPS (no sparsity)</li>
 <li>B200 FP8 dense Tensor Core peak: ~4 500 TFLOPS (no sparsity)</li>
 <li>VANILLA bf16 SDPA hovers at <strong>~1 330 TFLOPS</strong> at every shape ≥ S=4 680, i.e. ~59% of bf16 SoL — typical for FlashAttention-class kernels which are memory-bound past S~few-thousand.</li>
-<li>MXFP8 peaks at <strong>4 125 TFLOPS</strong> at S=27 000 ≈ 92% of FP8 SoL, then drops at S=75 600 because attention-matrix traffic dominates.</li>
+<li>MXFP8 kernel-only sits at <strong>1 463–1 701 TFLOPS</strong> across all four shapes ≈ 33–38% of FP8 SoL — the kernel is memory-bandwidth-bound at every shape we run, so TFLOPS-from-latency understates what the tensor cores are doing. The 1.26–1.28× speedup reflects bytes-moved at FP8 vs BF16, not compute throughput.</li>
 </ul>
 <p>Pure TFLOPS comparison between bf16 and FP8 kernels needs care: each kernel has a different SoL ceiling (2 250 vs 4 500), so equal achieved TFLOPS does not mean equal SoL%. We report TFLOPS as a self-consistent latency-derived metric and SoL% inline where it matters.</p>
 </details>
