@@ -9,3 +9,7 @@ prompts/flower_blooming_sage_blk16.mp4
 prompts/drone_city_night_sage_blk16.mp4
 prompts/dancer_jump_sage_blk16.mp4
 prompts/ocean_sunset_sage_blk16.mp4
+
+# Per-call traces — long-running sweeps generate >500KB of MXFP8/Sage call
+# logs. Kept on disk for debugging but not committed.
+prompts/traces/*.txt

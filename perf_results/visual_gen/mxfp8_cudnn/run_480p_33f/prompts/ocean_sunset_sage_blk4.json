@@ -1,0 +1,9 @@
+{
+  "prompt_id": "ocean_sunset",
+  "backend": "sage_blk4",
+  "prompt": "Ocean waves crashing on rocks at sunset, dramatic lighting",
+  "gen_s": 41.78395652770996,
+  "n_frames": 33,
+  "h": 480,
+  "w": 832
+}

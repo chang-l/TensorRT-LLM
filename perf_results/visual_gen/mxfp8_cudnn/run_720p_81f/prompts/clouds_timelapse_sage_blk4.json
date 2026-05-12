@@ -1,0 +1,9 @@
+{
+  "prompt_id": "clouds_timelapse",
+  "backend": "sage_blk4",
+  "prompt": "A timelapse of clouds moving slowly across a clear sky",
+  "gen_s": 463.34709095954895,
+  "n_frames": 81,
+  "h": 720,
+  "w": 1280
+}

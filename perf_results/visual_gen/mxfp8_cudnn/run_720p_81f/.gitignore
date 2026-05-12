@@ -3,3 +3,7 @@
 # metrics are also kept for re-computation if needed.
 *.npy
 prompts/*.mp4
+
+# Per-call traces — long-running sweeps generate >500KB of MXFP8/Sage call
+# logs. Kept on disk for debugging but not committed.
+prompts/traces/*.txt

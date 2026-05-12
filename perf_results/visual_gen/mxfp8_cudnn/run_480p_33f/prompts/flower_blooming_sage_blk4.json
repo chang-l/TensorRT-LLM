@@ -1,0 +1,9 @@
+{
+  "prompt_id": "flower_blooming",
+  "backend": "sage_blk4",
+  "prompt": "Close-up of a red rose blooming, fine petal detail",
+  "gen_s": 41.11072611808777,
+  "n_frames": 33,
+  "h": 480,
+  "w": 832
+}

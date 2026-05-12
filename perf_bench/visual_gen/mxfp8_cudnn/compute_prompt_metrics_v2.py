@@ -23,7 +23,7 @@ PROMPTS = [
     "ball_bouncing",
     "empty_room_sun",
 ]
-BACKENDS = ["MXFP8", "sage_blk16"]
+BACKENDS = ["MXFP8", "sage_blk16", "sage_blk4"]
 REF = "VANILLA"
 
 
