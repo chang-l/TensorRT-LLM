@@ -1,0 +1,9 @@
+{
+  "prompt_id": "empty_room_sun",
+  "backend": "sage_blk16",
+  "prompt": "An empty white room with sunlight coming through a window",
+  "gen_s": 36.15682578086853,
+  "n_frames": 33,
+  "h": 480,
+  "w": 832
+}

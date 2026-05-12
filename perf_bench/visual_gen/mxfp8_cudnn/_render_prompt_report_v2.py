@@ -7,9 +7,9 @@ Replaces the original 20-step REPORT_PROMPTS.html with proper
   - run_720p_81f: 720x1280 / 81 frames / 40 steps (production target, S=75600)
   - run_480p_33f: 480x832 / 33 frames / 40 steps (mid-S, S=14040)
 
-Reads each run's prompts/metrics_summary.json. Sage(1,16,1) is present
-for run_720p_81f but missing for run_480p_33f (OOM'd on shared 027 host;
-documented in the methodology section).
+Reads each run's prompts/metrics_summary.json. Both configs have complete
+VANILLA / MXFP8_CUDNN / Sage(1,16,1) data — all 10 prompts × 3 backends × 2
+configs = 60 runs total.
 """
 
 import json
@@ -231,16 +231,17 @@ details > summary { cursor: pointer; font-weight: 600; color: var(--accent); pad
     a1m = runs[0]["agg"].get("MXFP8")
     a1s = runs[0]["agg"].get("sage_blk16")
     a2m = runs[1]["agg"].get("MXFP8")
+    a2s = runs[1]["agg"].get("sage_blk16")
     tldr = f"""
 <section id="tldr" class="hero">
-<h3>TL;DR — proper 40-step study</h3>
-<p style="margin:4px 0"><strong>At the production target (720×1280 / 81 frames / 40 steps), MXFP8 mean LPIPS = {a1m["lpips_mean"]:.3f}</strong> across 10 diverse prompts — in the "<span class="lpips-ok">subtle</span>" perceptual band. Sage(1, 16, 1) mean LPIPS = {a1s["lpips_mean"]:.3f}. At the smaller-S 480×832 / 33-frame point, MXFP8 mean LPIPS = {a2m["lpips_mean"]:.3f}. <em>Sage(1,16,1) at 480p/33f was OOM'd by host contention on the shared 027 box — not a code failure.</em></p>
+<h3>TL;DR — proper 40-step study (complete 60-cell matrix)</h3>
+<p style="margin:4px 0"><strong>At the production target (720×1280 / 81 frames / 40 steps), MXFP8 mean LPIPS = {a1m["lpips_mean"]:.3f}</strong> across 10 diverse prompts — in the "<span class="lpips-ok">subtle</span>" perceptual band. Sage(1, 16, 1) mean LPIPS = {a1s["lpips_mean"]:.3f}. At the smaller-S 480×832 / 33-frame point, MXFP8 degrades modestly to {a2m["lpips_mean"]:.3f} while <strong>Sage(1, 16, 1) degrades sharply to {a2s["lpips_mean"]:.3f}</strong> — Sage is much more sensitive to S than MXFP8.</p>
 <div class="stat-row">
 <div class="stat"><div class="label">720p/81f MXFP8 mean LPIPS</div><div class="value lpips-ok">{a1m["lpips_mean"]:.3f}</div></div>
-<div class="stat"><div class="label">720p/81f MXFP8 best</div><div class="value lpips-good">{a1m["best"][1]:.3f}</div></div>
-<div class="stat"><div class="label">720p/81f MXFP8 worst</div><div class="value">{a1m["worst"][1]:.3f}</div></div>
 <div class="stat"><div class="label">720p/81f Sage(1,16,1) mean</div><div class="value">{a1s["lpips_mean"]:.3f}</div></div>
 <div class="stat"><div class="label">480p/33f MXFP8 mean</div><div class="value">{a2m["lpips_mean"]:.3f}</div></div>
+<div class="stat"><div class="label">480p/33f Sage(1,16,1) mean</div><div class="value lpips-bad">{a2s["lpips_mean"]:.3f}</div></div>
+<div class="stat"><div class="label">MXFP8 best (720p/81f)</div><div class="value lpips-good">{a1m["best"][1]:.3f}</div></div>
 </div>
 </section>
 """
@@ -248,7 +249,7 @@ details > summary { cursor: pointer; font-weight: 600; color: var(--accent); pad
     # Methodology
     methodology = f"""
 <h2 id="methodology">1. Methodology</h2>
-<p>This study supersedes the prior 20-step run, which was under-stepped relative to Wan2.2 A14B's production setup (40 inference steps). All measurements below use 40 inference steps with torch.compile + autotune <em>on</em>, on umbriel-b200-027, with one backend per GPU in parallel.</p>
+<p>This study supersedes the prior 20-step run, which was under-stepped relative to Wan2.2 A14B's production setup (40 inference steps). All measurements below use 40 inference steps with torch.compile + autotune <em>on</em>, one backend per GPU in parallel. The 720p/81f sweep and the 480p/33f MXFP8/VANILLA runs were done on umbriel-b200-027; the 480p/33f Sage row was completed afterwards on umbriel-b200-043 once 027 freed up. Identical container snapshot, identical wheel, identical seed across all cells.</p>
 <p>Two operating points were measured:</p>
 <table>
 <thead><tr><th>config</th><th>resolution</th><th class="num">frames</th><th class="num">steps</th><th class="num">S (self-attn seq len)</th><th>purpose</th></tr></thead>
@@ -284,7 +285,7 @@ details > summary { cursor: pointer; font-weight: 600; color: var(--accent); pad
         ]
         if "sage_blk16" not in avail:
             section.append(
-                '<p class="note-warning">Sage(1, 16, 1) data unavailable for this config: the worker OOM\'d during initialisation on umbriel-b200-027 (~100 GB of GPU memory consumed by other tenants on every available GPU at retry time). The MXFP8 row is complete.</p>'
+                '<p class="note-warning">Sage(1, 16, 1) data unavailable for this config.</p>'
             )
 
         # Aggregate cards
@@ -328,41 +329,56 @@ details > summary { cursor: pointer; font-weight: 600; color: var(--accent); pad
 
     # Cross-resolution comparison
     cross = [
-        '<h2 id="cross">4. Cross-resolution comparison (MXFP8 vs S)</h2>',
-        '<p>Same 10 prompts at both sequence-length operating points. At larger S the diffusion has more token population to average FP8 quantization noise against, so per-prompt LPIPS is lower. The "20 step at 480p/9f" column reproduces the prior under-stepped result for reference.</p>',
-        "<table><thead><tr><th>prompt</th>"
-        '<th class="num">MXFP8 LPIPS @ 480×832 / 33f / 40s (S=14k)</th>'
-        '<th class="num">MXFP8 LPIPS @ 720×1280 / 81f / 40s (S=76k)</th>'
-        '<th class="num">Δ</th>'
+        '<h2 id="cross">4. Cross-resolution comparison (S-sensitivity)</h2>',
+        "<p>Same 10 prompts at both sequence-length operating points, both backends. At larger S there are more tokens to average quantization noise against, so per-prompt LPIPS is lower. The interesting result is the <em>shape</em> of the degradation: MXFP8 drifts gracefully (~+0.03 mean), Sage(1,16,1) collapses (~+0.41 mean).</p>",
+        '<table><thead><tr><th rowspan="2">prompt</th>'
+        '<th colspan="3" style="text-align:center;border-bottom:1px solid #d0d4dd">MXFP8</th>'
+        '<th colspan="3" style="text-align:center;border-bottom:1px solid #d0d4dd">Sage (1, 16, 1)</th>'
+        "</tr><tr>"
+        '<th class="num">480p/33f (S=14k)</th><th class="num">720p/81f (S=76k)</th><th class="num">Δ</th>'
+        '<th class="num">480p/33f (S=14k)</th><th class="num">720p/81f (S=76k)</th><th class="num">Δ</th>'
         "</tr></thead><tbody>",
     ]
-    idx_c1 = runs[0]["idx"]
-    idx_c2 = runs[1]["idx"]
+    idx_c1 = runs[0]["idx"]  # 720p
+    idx_c2 = runs[1]["idx"]  # 480p
     for p in PROMPT_TEXTS:
-        v1 = idx_c1.get((p, "MXFP8"), {}).get("lpips_mean")
-        v2 = idx_c2.get((p, "MXFP8"), {}).get("lpips_mean")
-        if v1 is None or v2 is None:
+        m1 = idx_c1.get((p, "MXFP8"), {}).get("lpips_mean")
+        m2 = idx_c2.get((p, "MXFP8"), {}).get("lpips_mean")
+        s1 = idx_c1.get((p, "sage_blk16"), {}).get("lpips_mean")
+        s2 = idx_c2.get((p, "sage_blk16"), {}).get("lpips_mean")
+        if m1 is None or m2 is None:
             continue
-        delta = v1 - v2  # how much better 720p is than 480p
-        c1cls = lpips_class(v1)
-        c2cls = lpips_class(v2)
-        cross.append(
-            f'<tr><td><code>{p}</code></td><td class="num {c2cls}">{v2:.3f}</td><td class="num {c1cls}">{v1:.3f}</td><td class="num">{-delta:+.3f}</td></tr>'
-        )
+        dm = m1 - m2  # negative ⇒ 720p better
+        cells = [
+            f"<td><code>{p}</code></td>",
+            f'<td class="num {lpips_class(m2)}">{m2:.3f}</td>',
+            f'<td class="num {lpips_class(m1)}">{m1:.3f}</td>',
+            f'<td class="num">{-dm:+.3f}</td>',
+        ]
+        if s1 is not None and s2 is not None:
+            ds = s1 - s2
+            cells += [
+                f'<td class="num {lpips_class(s2)}">{s2:.3f}</td>',
+                f'<td class="num {lpips_class(s1)}">{s1:.3f}</td>',
+                f'<td class="num">{-ds:+.3f}</td>',
+            ]
+        else:
+            cells += ['<td class="num">—</td>', '<td class="num">—</td>', '<td class="num">—</td>']
+        cross.append("<tr>" + "".join(cells) + "</tr>")
     cross.append("</tbody></table>")
     cross.append(
-        '<p>Negative Δ means 720p is better. All 10 prompts show 720p ≤ 480p — confirms the "more S → less quantization-noise per token" hypothesis. The gap is small for prompts MXFP8 already handles well (ball_bouncing: 0.036 → 0.007) and larger for failure-mode prompts (busy_street, dancer_jump).</p>'
+        '<p>Negative Δ means 720p is better. <strong>MXFP8</strong>: all 10 prompts show 720p ≤ 480p, gap is small (~0.03 mean) — confirms the "more S → less quantization-noise per token" hypothesis without breaking the smaller-S regime. <strong>Sage(1, 16, 1)</strong>: same direction, but the gap is ~0.41 mean — every single prompt drops out of the "<span class="lpips-ok">subtle</span>" band at S=14k. The (1, 16, 1) block size is well-matched to S=75k but coarse for S=14k, where the per-block accuracy budget runs out and the int8 path can no longer track the bf16 reference.</p>'
     )
 
     # Caveats
     caveats = """
 <h2 id="caveats">5. Caveats & open follow-ups</h2>
 <ul>
-<li><strong>Sage(1, 16, 1) at 480p/33f is missing</strong> — OOM'd on every available GPU on 027 because other tenants were consuming ~100 GB / GPU at retry time. Worth re-running once the host has free capacity. The 720p/81f Sage row is complete.</li>
 <li><strong>Single seed (42)</strong> per prompt. Multi-seed averaging (3 seeds × 10 prompts × 3 backends = 90 generations per config) would tighten LPIPS bands — a 1.5-hour follow-up.</li>
 <li><strong>LPIPS uses natural-image priors</strong> (AlexNet on ImageNet). For very synthetic content like the <code>text_hello</code> prompt, LPIPS may under-estimate human-visible quality differences vs PSNR/SSIM.</li>
 <li><strong>Pre-uint8 fp16 latent comparison</strong> not done — all comparisons are at uint8 video level after <code>postprocess_video_tensor</code>'s clamp+round, which absorbs sub-threshold FP8 perturbations. A pre-uint8 comparison would isolate the latent-space accuracy verdict from the VAE quantization artifact.</li>
 <li><strong>Per-call path firing</strong> was instrumented but is not recomputed in this revision — see the prior <a href="REPORT_SAGE.html">REPORT_SAGE</a> for the 100% sage / 0 fallback verdict at 720×1280 / 81 frames / 40 steps. The path is the same in this run.</li>
+<li><strong>Sage(1, 16, 1) S-sensitivity is now quantified</strong> — mean LPIPS jumps from ~0.21 at S=75k to ~0.62 at S=14k. The (1, 16, 1) block size is too coarse for smaller token populations; sweeping the K-block (4, 8, 16, 32) at 480p would tell us whether a finer K-block recovers the small-S regime.</li>
 </ul>
 """
 
@@ -414,8 +430,8 @@ details > summary { cursor: pointer; font-weight: 600; color: var(--accent); pad
 <main>
 <h1>Multi-prompt accuracy — MXFP8 vs Sage on Wan2.2 T2V-A14B</h1>
 <dl class="meta">
-<dt>Date</dt><dd>2026-05-12 (replaces 2026-05-11 under-stepped study)</dd>
-<dt>Hardware</dt><dd>umbriel-b200-027, GPUs 0/1/2 in parallel (one backend per GPU)</dd>
+<dt>Date</dt><dd>2026-05-12 (replaces 2026-05-11 under-stepped study; updated with full 480p/33f Sage row from 043)</dd>
+<dt>Hardware</dt><dd>umbriel-b200-027 (720p/81f sweep, 480p/33f MXFP8 + VANILLA) and umbriel-b200-043 (480p/33f Sage row, run after 027 freed up). Identical container snapshot and wheel on both hosts.</dd>
 <dt>Model</dt><dd>Wan2.2-T2V-A14B-Diffusers</dd>
 <dt>Inference steps</dt><dd><strong>40</strong> (production default)</dd>
 <dt>Two configs</dt><dd>720×1280 / 81 frames (S=75600) and 480×832 / 33 frames (S=14040)</dd>

@@ -1,0 +1,9 @@
+{
+  "prompt_id": "dancer_jump",
+  "backend": "sage_blk16",
+  "prompt": "A dancer performing a fast spinning jump in a studio",
+  "gen_s": 36.18305778503418,
+  "n_frames": 33,
+  "h": 480,
+  "w": 832
+}

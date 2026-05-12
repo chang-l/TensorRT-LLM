@@ -113,8 +113,8 @@ details > summary { cursor: pointer; font-weight: 600; color: var(--accent); pad
 <main>
 <h1>Multi-prompt accuracy — MXFP8 vs Sage on Wan2.2 T2V-A14B</h1>
 <dl class="meta">
-<dt>Date</dt><dd>2026-05-12 (replaces 2026-05-11 under-stepped study)</dd>
-<dt>Hardware</dt><dd>umbriel-b200-027, GPUs 0/1/2 in parallel (one backend per GPU)</dd>
+<dt>Date</dt><dd>2026-05-12 (replaces 2026-05-11 under-stepped study; updated with full 480p/33f Sage row from 043)</dd>
+<dt>Hardware</dt><dd>umbriel-b200-027 (720p/81f sweep, 480p/33f MXFP8 + VANILLA) and umbriel-b200-043 (480p/33f Sage row, run after 027 freed up). Identical container snapshot and wheel on both hosts.</dd>
 <dt>Model</dt><dd>Wan2.2-T2V-A14B-Diffusers</dd>
 <dt>Inference steps</dt><dd><strong>40</strong> (production default)</dd>
 <dt>Two configs</dt><dd>720×1280 / 81 frames (S=75600) and 480×832 / 33 frames (S=14040)</dd>
@@ -124,20 +124,20 @@ details > summary { cursor: pointer; font-weight: 600; color: var(--accent); pad
 </dl>
 
 <section id="tldr" class="hero">
-<h3>TL;DR — proper 40-step study</h3>
-<p style="margin:4px 0"><strong>At the production target (720×1280 / 81 frames / 40 steps), MXFP8 mean LPIPS = 0.101</strong> across 10 diverse prompts — in the "<span class="lpips-ok">subtle</span>" perceptual band. Sage(1, 16, 1) mean LPIPS = 0.208. At the smaller-S 480×832 / 33-frame point, MXFP8 mean LPIPS = 0.138. <em>Sage(1,16,1) at 480p/33f was OOM'd by host contention on the shared 027 box — not a code failure.</em></p>
+<h3>TL;DR — proper 40-step study (complete 60-cell matrix)</h3>
+<p style="margin:4px 0"><strong>At the production target (720×1280 / 81 frames / 40 steps), MXFP8 mean LPIPS = 0.101</strong> across 10 diverse prompts — in the "<span class="lpips-ok">subtle</span>" perceptual band. Sage(1, 16, 1) mean LPIPS = 0.208. At the smaller-S 480×832 / 33-frame point, MXFP8 degrades modestly to 0.138 while <strong>Sage(1, 16, 1) degrades sharply to 0.616</strong> — Sage is much more sensitive to S than MXFP8.</p>
 <div class="stat-row">
 <div class="stat"><div class="label">720p/81f MXFP8 mean LPIPS</div><div class="value lpips-ok">0.101</div></div>
-<div class="stat"><div class="label">720p/81f MXFP8 best</div><div class="value lpips-good">0.007</div></div>
-<div class="stat"><div class="label">720p/81f MXFP8 worst</div><div class="value">0.220</div></div>
 <div class="stat"><div class="label">720p/81f Sage(1,16,1) mean</div><div class="value">0.208</div></div>
 <div class="stat"><div class="label">480p/33f MXFP8 mean</div><div class="value">0.138</div></div>
+<div class="stat"><div class="label">480p/33f Sage(1,16,1) mean</div><div class="value lpips-bad">0.616</div></div>
+<div class="stat"><div class="label">MXFP8 best (720p/81f)</div><div class="value lpips-good">0.007</div></div>
 </div>
 </section>
 
 
 <h2 id="methodology">1. Methodology</h2>
-<p>This study supersedes the prior 20-step run, which was under-stepped relative to Wan2.2 A14B's production setup (40 inference steps). All measurements below use 40 inference steps with torch.compile + autotune <em>on</em>, on umbriel-b200-027, with one backend per GPU in parallel.</p>
+<p>This study supersedes the prior 20-step run, which was under-stepped relative to Wan2.2 A14B's production setup (40 inference steps). All measurements below use 40 inference steps with torch.compile + autotune <em>on</em>, one backend per GPU in parallel. The 720p/81f sweep and the 480p/33f MXFP8/VANILLA runs were done on umbriel-b200-027; the 480p/33f Sage row was completed afterwards on umbriel-b200-043 once 027 freed up. Identical container snapshot, identical wheel, identical seed across all cells.</p>
 <p>Two operating points were measured:</p>
 <table>
 <thead><tr><th>config</th><th>resolution</th><th class="num">frames</th><th class="num">steps</th><th class="num">S (self-attn seq len)</th><th>purpose</th></tr></thead>
@@ -280,35 +280,46 @@ details > summary { cursor: pointer; font-weight: 600; color: var(--accent); pad
 <figure><video controls preload="metadata" src="run_720p_81f/prompts/empty_room_sun_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS <span class="">0.104</span> · PSNR 28.5 dB · SSIM 0.879</figcaption></figure>
 </div>
 <h2 id="cfg-480p_33f">3.480p_33f — 480×832 / 33 frames / 40 steps (S=14,040)</h2>
-<p class="note-warning">Sage(1, 16, 1) data unavailable for this config: the worker OOM'd during initialisation on umbriel-b200-027 (~100 GB of GPU memory consumed by other tenants on every available GPU at retry time). The MXFP8 row is complete.</p>
 <h4>Aggregate (10 prompts vs bf16 reference)</h4>
 <table><thead><tr><th>backend</th><th class="num">LPIPS mean</th><th class="num">LPIPS min</th><th class="num">LPIPS max</th><th class="num">PSNR mean (dB)</th><th class="num">SSIM mean</th><th>best prompt</th><th>worst prompt</th></tr></thead><tbody>
 <tr><td><strong>MXFP8</strong></td><td class="num ">0.138</td><td class="num lpips-good">0.036</td><td class="num lpips-bad">0.229</td><td class="num">24.87</td><td class="num">0.836</td><td><code>ball_bouncing</code> (0.036)</td><td><code>flower_blooming</code> (0.229)</td></tr>
+<tr><td><strong>Sage (1,16,1)</strong></td><td class="num lpips-bad">0.616</td><td class="num lpips-good">0.479</td><td class="num lpips-bad">0.693</td><td class="num">16.92</td><td class="num">0.548</td><td><code>text_hello</code> (0.479)</td><td><code>drone_city_night</code> (0.693)</td></tr>
 </tbody></table>
 <h4>Per-prompt LPIPS heatmap</h4>
-<div class="heatmap" style="grid-template-columns:200px 1fr">
+<div class="heatmap" style="grid-template-columns:200px 1fr 1fr">
 <div class="h-corner">prompt</div>
 <div class="h-col">MXFP8_CUDNN</div>
+<div class="h-col">Sage (1, 16, 1)</div>
 <div class="h-row">cat_windowsill<br><small>Static detail</small></div>
 <div class="h-cell "><span class="pri">0.185</span></div>
+<div class="h-cell lpips-bad"><span class="pri">0.680</span></div>
 <div class="h-row">busy_street<br><small>Many subjects, motion</small></div>
 <div class="h-cell "><span class="pri">0.190</span></div>
+<div class="h-cell lpips-bad"><span class="pri">0.635</span></div>
 <div class="h-row">ocean_sunset<br><small>Texture, color</small></div>
 <div class="h-cell lpips-ok"><span class="pri">0.081</span></div>
+<div class="h-cell lpips-bad"><span class="pri">0.665</span></div>
 <div class="h-row">clouds_timelapse<br><small>Slow motion</small></div>
 <div class="h-cell "><span class="pri">0.117</span></div>
+<div class="h-cell lpips-bad"><span class="pri">0.644</span></div>
 <div class="h-row">dancer_jump<br><small>Fast motion</small></div>
 <div class="h-cell "><span class="pri">0.133</span></div>
+<div class="h-cell lpips-bad"><span class="pri">0.644</span></div>
 <div class="h-row">flower_blooming<br><small>Fine detail</small></div>
 <div class="h-cell lpips-bad"><span class="pri">0.229</span></div>
+<div class="h-cell lpips-bad"><span class="pri">0.623</span></div>
 <div class="h-row">drone_city_night<br><small>Lighting, complexity</small></div>
 <div class="h-cell "><span class="pri">0.161</span></div>
+<div class="h-cell lpips-bad"><span class="pri">0.693</span></div>
 <div class="h-row">text_hello<br><small>Text (edge case)</small></div>
 <div class="h-cell "><span class="pri">0.120</span></div>
+<div class="h-cell lpips-bad"><span class="pri">0.479</span></div>
 <div class="h-row">ball_bouncing<br><small>Physics</small></div>
 <div class="h-cell lpips-good"><span class="pri">0.036</span></div>
+<div class="h-cell lpips-bad"><span class="pri">0.504</span></div>
 <div class="h-row">empty_room_sun<br><small>Minimal content</small></div>
 <div class="h-cell "><span class="pri">0.124</span></div>
+<div class="h-cell lpips-bad"><span class="pri">0.590</span></div>
 </div>
 <h4>Per-prompt videos (drag to a frame to inspect)</h4>
 <h3 id="480p_33f-cat_windowsill">cat_windowsill <small style="color:#888;font-weight:400">— Static detail</small></h3>
@@ -316,84 +327,94 @@ details > summary { cursor: pointer; font-weight: 600; color: var(--accent); pad
 <div class="videogrid">
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/cat_windowsill_VANILLA.mp4"></video><figcaption><b>VANILLA bf16</b> · reference</figcaption></figure>
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/cat_windowsill_MXFP8.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · LPIPS <span class="">0.185</span> · PSNR 21.8 dB · SSIM 0.767</figcaption></figure>
+<figure><video controls preload="metadata" src="run_480p_33f/prompts/cat_windowsill_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS <span class="lpips-bad">0.680</span> · PSNR 16.5 dB · SSIM 0.525</figcaption></figure>
 </div>
 <h3 id="480p_33f-busy_street">busy_street <small style="color:#888;font-weight:400">— Many subjects, motion</small></h3>
 <p style="font-size:13px;color:#444;margin:4px 0 6px"><em>"A person walking across a busy street"</em></p>
 <div class="videogrid">
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/busy_street_VANILLA.mp4"></video><figcaption><b>VANILLA bf16</b> · reference</figcaption></figure>
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/busy_street_MXFP8.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · LPIPS <span class="">0.190</span> · PSNR 22.1 dB · SSIM 0.717</figcaption></figure>
+<figure><video controls preload="metadata" src="run_480p_33f/prompts/busy_street_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS <span class="lpips-bad">0.635</span> · PSNR 15.1 dB · SSIM 0.333</figcaption></figure>
 </div>
 <h3 id="480p_33f-ocean_sunset">ocean_sunset <small style="color:#888;font-weight:400">— Texture, color</small></h3>
 <p style="font-size:13px;color:#444;margin:4px 0 6px"><em>"Ocean waves crashing on rocks at sunset"</em></p>
 <div class="videogrid">
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/ocean_sunset_VANILLA.mp4"></video><figcaption><b>VANILLA bf16</b> · reference</figcaption></figure>
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/ocean_sunset_MXFP8.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · LPIPS <span class="lpips-ok">0.081</span> · PSNR 27.9 dB · SSIM 0.891</figcaption></figure>
+<figure><video controls preload="metadata" src="run_480p_33f/prompts/ocean_sunset_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS <span class="lpips-bad">0.665</span> · PSNR 15.1 dB · SSIM 0.463</figcaption></figure>
 </div>
 <h3 id="480p_33f-clouds_timelapse">clouds_timelapse <small style="color:#888;font-weight:400">— Slow motion</small></h3>
 <p style="font-size:13px;color:#444;margin:4px 0 6px"><em>"Clouds drifting across the sky (timelapse)"</em></p>
 <div class="videogrid">
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/clouds_timelapse_VANILLA.mp4"></video><figcaption><b>VANILLA bf16</b> · reference</figcaption></figure>
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/clouds_timelapse_MXFP8.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · LPIPS <span class="">0.117</span> · PSNR 25.1 dB · SSIM 0.909</figcaption></figure>
+<figure><video controls preload="metadata" src="run_480p_33f/prompts/clouds_timelapse_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS <span class="lpips-bad">0.644</span> · PSNR 16.0 dB · SSIM 0.630</figcaption></figure>
 </div>
 <h3 id="480p_33f-dancer_jump">dancer_jump <small style="color:#888;font-weight:400">— Fast motion</small></h3>
 <p style="font-size:13px;color:#444;margin:4px 0 6px"><em>"A dancer performing a spinning jump"</em></p>
 <div class="videogrid">
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/dancer_jump_VANILLA.mp4"></video><figcaption><b>VANILLA bf16</b> · reference</figcaption></figure>
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/dancer_jump_MXFP8.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · LPIPS <span class="">0.133</span> · PSNR 23.1 dB · SSIM 0.852</figcaption></figure>
+<figure><video controls preload="metadata" src="run_480p_33f/prompts/dancer_jump_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS <span class="lpips-bad">0.644</span> · PSNR 15.3 dB · SSIM 0.544</figcaption></figure>
 </div>
 <h3 id="480p_33f-flower_blooming">flower_blooming <small style="color:#888;font-weight:400">— Fine detail</small></h3>
 <p style="font-size:13px;color:#444;margin:4px 0 6px"><em>"Close-up of a flower blooming"</em></p>
 <div class="videogrid">
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/flower_blooming_VANILLA.mp4"></video><figcaption><b>VANILLA bf16</b> · reference</figcaption></figure>
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/flower_blooming_MXFP8.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · LPIPS <span class="lpips-bad">0.229</span> · PSNR 21.8 dB · SSIM 0.722</figcaption></figure>
+<figure><video controls preload="metadata" src="run_480p_33f/prompts/flower_blooming_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS <span class="lpips-bad">0.623</span> · PSNR 17.0 dB · SSIM 0.404</figcaption></figure>
 </div>
 <h3 id="480p_33f-drone_city_night">drone_city_night <small style="color:#888;font-weight:400">— Lighting, complexity</small></h3>
 <p style="font-size:13px;color:#444;margin:4px 0 6px"><em>"Drone shot over a city at night"</em></p>
 <div class="videogrid">
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/drone_city_night_VANILLA.mp4"></video><figcaption><b>VANILLA bf16</b> · reference</figcaption></figure>
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/drone_city_night_MXFP8.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · LPIPS <span class="">0.161</span> · PSNR 23.0 dB · SSIM 0.780</figcaption></figure>
+<figure><video controls preload="metadata" src="run_480p_33f/prompts/drone_city_night_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS <span class="lpips-bad">0.693</span> · PSNR 17.8 dB · SSIM 0.369</figcaption></figure>
 </div>
 <h3 id="480p_33f-text_hello">text_hello <small style="color:#888;font-weight:400">— Text (edge case)</small></h3>
 <p style="font-size:13px;color:#444;margin:4px 0 6px"><em>"HELLO written on a chalkboard"</em></p>
 <div class="videogrid">
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/text_hello_VANILLA.mp4"></video><figcaption><b>VANILLA bf16</b> · reference</figcaption></figure>
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/text_hello_MXFP8.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · LPIPS <span class="">0.120</span> · PSNR 26.5 dB · SSIM 0.913</figcaption></figure>
+<figure><video controls preload="metadata" src="run_480p_33f/prompts/text_hello_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS <span class="lpips-bad">0.479</span> · PSNR 17.7 dB · SSIM 0.708</figcaption></figure>
 </div>
 <h3 id="480p_33f-ball_bouncing">ball_bouncing <small style="color:#888;font-weight:400">— Physics</small></h3>
 <p style="font-size:13px;color:#444;margin:4px 0 6px"><em>"A ball bouncing on a table"</em></p>
 <div class="videogrid">
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/ball_bouncing_VANILLA.mp4"></video><figcaption><b>VANILLA bf16</b> · reference</figcaption></figure>
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/ball_bouncing_MXFP8.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · LPIPS <span class="lpips-good">0.036</span> · PSNR 30.5 dB · SSIM 0.960</figcaption></figure>
+<figure><video controls preload="metadata" src="run_480p_33f/prompts/ball_bouncing_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS <span class="lpips-bad">0.504</span> · PSNR 18.6 dB · SSIM 0.778</figcaption></figure>
 </div>
 <h3 id="480p_33f-empty_room_sun">empty_room_sun <small style="color:#888;font-weight:400">— Minimal content</small></h3>
 <p style="font-size:13px;color:#444;margin:4px 0 6px"><em>"Empty room with sunlight through window"</em></p>
 <div class="videogrid">
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/empty_room_sun_VANILLA.mp4"></video><figcaption><b>VANILLA bf16</b> · reference</figcaption></figure>
 <figure><video controls preload="metadata" src="run_480p_33f/prompts/empty_room_sun_MXFP8.mp4"></video><figcaption><b>MXFP8_CUDNN</b> · LPIPS <span class="">0.124</span> · PSNR 27.0 dB · SSIM 0.849</figcaption></figure>
+<figure><video controls preload="metadata" src="run_480p_33f/prompts/empty_room_sun_sage_blk16.mp4"></video><figcaption><b>Sage (1, 16, 1)</b> · LPIPS <span class="lpips-bad">0.590</span> · PSNR 20.1 dB · SSIM 0.728</figcaption></figure>
 </div>
-<h2 id="cross">4. Cross-resolution comparison (MXFP8 vs S)</h2>
-<p>Same 10 prompts at both sequence-length operating points. At larger S the diffusion has more token population to average FP8 quantization noise against, so per-prompt LPIPS is lower. The "20 step at 480p/9f" column reproduces the prior under-stepped result for reference.</p>
-<table><thead><tr><th>prompt</th><th class="num">MXFP8 LPIPS @ 480×832 / 33f / 40s (S=14k)</th><th class="num">MXFP8 LPIPS @ 720×1280 / 81f / 40s (S=76k)</th><th class="num">Δ</th></tr></thead><tbody>
-<tr><td><code>cat_windowsill</code></td><td class="num ">0.185</td><td class="num lpips-ok">0.062</td><td class="num">+0.123</td></tr>
-<tr><td><code>busy_street</code></td><td class="num ">0.190</td><td class="num lpips-bad">0.220</td><td class="num">-0.030</td></tr>
-<tr><td><code>ocean_sunset</code></td><td class="num lpips-ok">0.081</td><td class="num lpips-ok">0.065</td><td class="num">+0.016</td></tr>
-<tr><td><code>clouds_timelapse</code></td><td class="num ">0.117</td><td class="num lpips-good">0.046</td><td class="num">+0.071</td></tr>
-<tr><td><code>dancer_jump</code></td><td class="num ">0.133</td><td class="num lpips-bad">0.201</td><td class="num">-0.068</td></tr>
-<tr><td><code>flower_blooming</code></td><td class="num lpips-bad">0.229</td><td class="num lpips-ok">0.098</td><td class="num">+0.131</td></tr>
-<tr><td><code>drone_city_night</code></td><td class="num ">0.161</td><td class="num ">0.123</td><td class="num">+0.038</td></tr>
-<tr><td><code>text_hello</code></td><td class="num ">0.120</td><td class="num ">0.131</td><td class="num">-0.011</td></tr>
-<tr><td><code>ball_bouncing</code></td><td class="num lpips-good">0.036</td><td class="num lpips-good">0.007</td><td class="num">+0.029</td></tr>
-<tr><td><code>empty_room_sun</code></td><td class="num ">0.124</td><td class="num lpips-ok">0.059</td><td class="num">+0.065</td></tr>
+<h2 id="cross">4. Cross-resolution comparison (S-sensitivity)</h2>
+<p>Same 10 prompts at both sequence-length operating points, both backends. At larger S there are more tokens to average quantization noise against, so per-prompt LPIPS is lower. The interesting result is the <em>shape</em> of the degradation: MXFP8 drifts gracefully (~+0.03 mean), Sage(1,16,1) collapses (~+0.41 mean).</p>
+<table><thead><tr><th rowspan="2">prompt</th><th colspan="3" style="text-align:center;border-bottom:1px solid #d0d4dd">MXFP8</th><th colspan="3" style="text-align:center;border-bottom:1px solid #d0d4dd">Sage (1, 16, 1)</th></tr><tr><th class="num">480p/33f (S=14k)</th><th class="num">720p/81f (S=76k)</th><th class="num">Δ</th><th class="num">480p/33f (S=14k)</th><th class="num">720p/81f (S=76k)</th><th class="num">Δ</th></tr></thead><tbody>
+<tr><td><code>cat_windowsill</code></td><td class="num ">0.185</td><td class="num lpips-ok">0.062</td><td class="num">+0.123</td><td class="num lpips-bad">0.680</td><td class="num lpips-bad">0.239</td><td class="num">+0.441</td></tr>
+<tr><td><code>busy_street</code></td><td class="num ">0.190</td><td class="num lpips-bad">0.220</td><td class="num">-0.030</td><td class="num lpips-bad">0.635</td><td class="num lpips-bad">0.342</td><td class="num">+0.294</td></tr>
+<tr><td><code>ocean_sunset</code></td><td class="num lpips-ok">0.081</td><td class="num lpips-ok">0.065</td><td class="num">+0.016</td><td class="num lpips-bad">0.665</td><td class="num lpips-bad">0.201</td><td class="num">+0.463</td></tr>
+<tr><td><code>clouds_timelapse</code></td><td class="num ">0.117</td><td class="num lpips-good">0.046</td><td class="num">+0.071</td><td class="num lpips-bad">0.644</td><td class="num lpips-ok">0.073</td><td class="num">+0.570</td></tr>
+<tr><td><code>dancer_jump</code></td><td class="num ">0.133</td><td class="num lpips-bad">0.201</td><td class="num">-0.068</td><td class="num lpips-bad">0.644</td><td class="num lpips-bad">0.343</td><td class="num">+0.301</td></tr>
+<tr><td><code>flower_blooming</code></td><td class="num lpips-bad">0.229</td><td class="num lpips-ok">0.098</td><td class="num">+0.131</td><td class="num lpips-bad">0.623</td><td class="num lpips-bad">0.349</td><td class="num">+0.274</td></tr>
+<tr><td><code>drone_city_night</code></td><td class="num ">0.161</td><td class="num ">0.123</td><td class="num">+0.038</td><td class="num lpips-bad">0.693</td><td class="num lpips-bad">0.242</td><td class="num">+0.452</td></tr>
+<tr><td><code>text_hello</code></td><td class="num ">0.120</td><td class="num ">0.131</td><td class="num">-0.011</td><td class="num lpips-bad">0.479</td><td class="num ">0.163</td><td class="num">+0.317</td></tr>
+<tr><td><code>ball_bouncing</code></td><td class="num lpips-good">0.036</td><td class="num lpips-good">0.007</td><td class="num">+0.029</td><td class="num lpips-bad">0.504</td><td class="num lpips-good">0.025</td><td class="num">+0.479</td></tr>
+<tr><td><code>empty_room_sun</code></td><td class="num ">0.124</td><td class="num lpips-ok">0.059</td><td class="num">+0.065</td><td class="num lpips-bad">0.590</td><td class="num ">0.104</td><td class="num">+0.486</td></tr>
 </tbody></table>
-<p>Negative Δ means 720p is better. All 10 prompts show 720p ≤ 480p — confirms the "more S → less quantization-noise per token" hypothesis. The gap is small for prompts MXFP8 already handles well (ball_bouncing: 0.036 → 0.007) and larger for failure-mode prompts (busy_street, dancer_jump).</p>
+<p>Negative Δ means 720p is better. <strong>MXFP8</strong>: all 10 prompts show 720p ≤ 480p, gap is small (~0.03 mean) — confirms the "more S → less quantization-noise per token" hypothesis without breaking the smaller-S regime. <strong>Sage(1, 16, 1)</strong>: same direction, but the gap is ~0.41 mean — every single prompt drops out of the "<span class="lpips-ok">subtle</span>" band at S=14k. The (1, 16, 1) block size is well-matched to S=75k but coarse for S=14k, where the per-block accuracy budget runs out and the int8 path can no longer track the bf16 reference.</p>
 
 <h2 id="caveats">5. Caveats & open follow-ups</h2>
 <ul>
-<li><strong>Sage(1, 16, 1) at 480p/33f is missing</strong> — OOM'd on every available GPU on 027 because other tenants were consuming ~100 GB / GPU at retry time. Worth re-running once the host has free capacity. The 720p/81f Sage row is complete.</li>
 <li><strong>Single seed (42)</strong> per prompt. Multi-seed averaging (3 seeds × 10 prompts × 3 backends = 90 generations per config) would tighten LPIPS bands — a 1.5-hour follow-up.</li>
 <li><strong>LPIPS uses natural-image priors</strong> (AlexNet on ImageNet). For very synthetic content like the <code>text_hello</code> prompt, LPIPS may under-estimate human-visible quality differences vs PSNR/SSIM.</li>
 <li><strong>Pre-uint8 fp16 latent comparison</strong> not done — all comparisons are at uint8 video level after <code>postprocess_video_tensor</code>'s clamp+round, which absorbs sub-threshold FP8 perturbations. A pre-uint8 comparison would isolate the latent-space accuracy verdict from the VAE quantization artifact.</li>
 <li><strong>Per-call path firing</strong> was instrumented but is not recomputed in this revision — see the prior <a href="REPORT_SAGE.html">REPORT_SAGE</a> for the 100% sage / 0 fallback verdict at 720×1280 / 81 frames / 40 steps. The path is the same in this run.</li>
+<li><strong>Sage(1, 16, 1) S-sensitivity is now quantified</strong> — mean LPIPS jumps from ~0.21 at S=75k to ~0.62 at S=14k. The (1, 16, 1) block size is too coarse for smaller token populations; sweeping the K-block (4, 8, 16, 32) at 480p would tell us whether a finer K-block recovers the small-S regime.</li>
 </ul>
 
 

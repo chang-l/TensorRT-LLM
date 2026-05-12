@@ -1,0 +1,9 @@
+{
+  "prompt_id": "text_hello",
+  "backend": "sage_blk16",
+  "prompt": "The word 'HELLO' written in chalk on a green chalkboard",
+  "gen_s": 36.12644934654236,
+  "n_frames": 33,
+  "h": 480,
+  "w": 832
+}

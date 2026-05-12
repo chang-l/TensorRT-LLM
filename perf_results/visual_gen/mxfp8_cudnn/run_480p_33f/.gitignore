@@ -1,2 +1,11 @@
-# 480p/33f frame tensors are large; mp4s are small enough to commit.
+# 480p/33f frame tensors are large; most mp4s are small enough to commit.
 *.npy
+
+# Sage(1, 16, 1) at 480p/33f is much noisier than MXFP8/VANILLA so libx264
+# can't compress it under the 500 KB pre-commit limit on several prompts.
+# These remain on disk for the sc.talos web viewer; not committed.
+prompts/busy_street_sage_blk16.mp4
+prompts/flower_blooming_sage_blk16.mp4
+prompts/drone_city_night_sage_blk16.mp4
+prompts/dancer_jump_sage_blk16.mp4
+prompts/ocean_sunset_sage_blk16.mp4
