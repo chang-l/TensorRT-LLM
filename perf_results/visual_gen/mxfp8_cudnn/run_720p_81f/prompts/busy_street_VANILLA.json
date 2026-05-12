@@ -1,0 +1,9 @@
+{
+  "prompt_id": "busy_street",
+  "backend": "VANILLA",
+  "prompt": "A person walking across a busy street downtown, midday",
+  "gen_s": 439.29104566574097,
+  "n_frames": 81,
+  "h": 720,
+  "w": 1280
+}

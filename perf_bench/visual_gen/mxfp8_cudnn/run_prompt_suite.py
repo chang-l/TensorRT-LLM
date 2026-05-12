@@ -60,6 +60,11 @@ def parse_args():
     p.add_argument(
         "--prompts", nargs="+", default=None, help="Restrict to these prompt IDs (default: all 10)"
     )
+    p.add_argument(
+        "--disable_torch_compile",
+        action="store_true",
+        help="Disable torch.compile + autotune (lower memory footprint)",
+    )
     return p.parse_args()
 
 
@@ -102,8 +107,8 @@ def main():
         parallel={"dit_cfg_size": 1, "dit_ulysses_size": 1, "enable_parallel_vae": False},
         cuda_graph={"enable_cuda_graph": False},
         torch_compile={
-            "enable_torch_compile": True,
-            "enable_autotune": True,
+            "enable_torch_compile": not args.disable_torch_compile,
+            "enable_autotune": not args.disable_torch_compile,
             "enable_fullgraph": False,
         },
     )

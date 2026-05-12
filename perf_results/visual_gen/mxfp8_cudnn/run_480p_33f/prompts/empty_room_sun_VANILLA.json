@@ -1,0 +1,9 @@
+{
+  "prompt_id": "empty_room_sun",
+  "backend": "VANILLA",
+  "prompt": "An empty white room with sunlight coming through a window",
+  "gen_s": 78.72485399246216,
+  "n_frames": 33,
+  "h": 480,
+  "w": 832
+}

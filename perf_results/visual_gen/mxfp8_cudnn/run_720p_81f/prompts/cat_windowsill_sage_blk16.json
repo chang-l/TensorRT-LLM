@@ -1,0 +1,9 @@
+{
+  "prompt_id": "cat_windowsill",
+  "backend": "sage_blk16",
+  "prompt": "A cat sitting still on a windowsill, soft daylight",
+  "gen_s": 412.52467703819275,
+  "n_frames": 81,
+  "h": 720,
+  "w": 1280
+}

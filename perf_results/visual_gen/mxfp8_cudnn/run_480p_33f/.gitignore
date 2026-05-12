@@ -1,0 +1,2 @@
+# 480p/33f frame tensors are large; mp4s are small enough to commit.
+*.npy

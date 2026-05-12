@@ -1,0 +1,9 @@
+{
+  "prompt_id": "text_hello",
+  "backend": "MXFP8",
+  "prompt": "The word 'HELLO' written in chalk on a green chalkboard",
+  "gen_s": 426.3677034378052,
+  "n_frames": 81,
+  "h": 720,
+  "w": 1280
+}

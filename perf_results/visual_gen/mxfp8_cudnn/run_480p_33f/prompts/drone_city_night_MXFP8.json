@@ -1,0 +1,9 @@
+{
+  "prompt_id": "drone_city_night",
+  "backend": "MXFP8",
+  "prompt": "A drone shot flying over a city skyline at night, neon lights",
+  "gen_s": 40.044342279434204,
+  "n_frames": 33,
+  "h": 480,
+  "w": 832
+}

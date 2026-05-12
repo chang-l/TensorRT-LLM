@@ -1,0 +1,9 @@
+{
+  "prompt_id": "ball_bouncing",
+  "backend": "VANILLA",
+  "prompt": "A red ball bouncing on a wooden table, white background",
+  "gen_s": 427.234580039978,
+  "n_frames": 81,
+  "h": 720,
+  "w": 1280
+}

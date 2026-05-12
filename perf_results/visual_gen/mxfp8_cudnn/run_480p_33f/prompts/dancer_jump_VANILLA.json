@@ -1,0 +1,9 @@
+{
+  "prompt_id": "dancer_jump",
+  "backend": "VANILLA",
+  "prompt": "A dancer performing a fast spinning jump in a studio",
+  "gen_s": 78.77327227592468,
+  "n_frames": 33,
+  "h": 480,
+  "w": 832
+}

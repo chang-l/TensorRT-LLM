@@ -1,0 +1,9 @@
+{
+  "prompt_id": "clouds_timelapse",
+  "backend": "VANILLA",
+  "prompt": "A timelapse of clouds moving slowly across a clear sky",
+  "gen_s": 427.9887783527374,
+  "n_frames": 81,
+  "h": 720,
+  "w": 1280
+}

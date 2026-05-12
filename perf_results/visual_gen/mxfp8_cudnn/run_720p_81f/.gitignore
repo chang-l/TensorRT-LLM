@@ -1,0 +1,5 @@
+# 720p/81f mp4s are ~900 KB each (exceed 500 KB pre-commit limit).
+# Available on disk for the web viewer; raw .npy frames + per-frame
+# metrics are also kept for re-computation if needed.
+*.npy
+prompts/*.mp4

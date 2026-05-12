@@ -1,0 +1,9 @@
+{
+  "prompt_id": "busy_street",
+  "backend": "MXFP8",
+  "prompt": "A person walking across a busy street downtown, midday",
+  "gen_s": 40.124027967453,
+  "n_frames": 33,
+  "h": 480,
+  "w": 832
+}

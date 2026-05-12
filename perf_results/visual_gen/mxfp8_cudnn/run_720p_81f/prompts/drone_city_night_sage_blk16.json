@@ -1,0 +1,9 @@
+{
+  "prompt_id": "drone_city_night",
+  "backend": "sage_blk16",
+  "prompt": "A drone shot flying over a city skyline at night, neon lights",
+  "gen_s": 403.13274097442627,
+  "n_frames": 81,
+  "h": 720,
+  "w": 1280
+}
