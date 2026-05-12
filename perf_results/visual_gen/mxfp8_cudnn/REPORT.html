@@ -664,6 +664,20 @@ corr  (full):       1.000000</code></pre>
     if (sec) io.observe(sec);
   });
 })();
+
+// Fragment-fix: work around proxied viewers (sc.talos) that swallow URL
+// fragments on initial load. The browser address bar still has #anchor, so
+// we read window.location.hash after load and scroll there programmatically.
+window.addEventListener('load', function () {
+  if (!window.location.hash) return;
+  var id = decodeURIComponent(window.location.hash.slice(1));
+  var el = document.getElementById(id);
+  if (el) {
+    setTimeout(function () {
+      el.scrollIntoView({ behavior: 'auto', block: 'start' });
+    }, 30);
+  }
+});
 </script>
 </body>
 </html>
