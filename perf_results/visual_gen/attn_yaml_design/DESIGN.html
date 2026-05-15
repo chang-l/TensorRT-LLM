@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Visual-gen attention YAML — design refinement</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #fafafa; --fg: #1a1a1a; --muted: #666; --rule: #e0e0e0;
+    --code-bg: #f1f3f5; --accent: #76b900;
+    --accent-bg: #e9f5d3;
+    --good: #2e7d32;   --good-bg:  #e8f5e9;
+    --ok:   #f9a825;   --ok-bg:    #fff8e1;
+    --bad:  #c62828;   --bad-bg:   #ffebee;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+         background: var(--bg); color: var(--fg); line-height: 1.55; margin: 0; padding: 0; }
+  .layout { display: grid; grid-template-columns: 230px minmax(0, 1fr);
+            gap: 32px; max-width: 1300px; margin: 0 auto; padding: 24px; }
+  nav.toc { position: sticky; top: 12px; align-self: start; max-height: 95vh;
+            overflow-y: auto; padding: 16px; font-size: 13px;
+            background: white; border: 1px solid var(--rule); border-radius: 8px; }
+  nav.toc h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+               margin: 0 0 8px; color: var(--muted); }
+  nav.toc ol { padding-left: 18px; margin: 0; }
+  nav.toc a { color: var(--fg); text-decoration: none; }
+  nav.toc a:hover { color: var(--accent); }
+  main { min-width: 0; padding-bottom: 80px; }
+  main h1 { font-size: 26px; margin: 0 0 4px; }
+  main h2 { font-size: 20px; margin: 36px 0 10px; padding-bottom: 6px;
+            border-bottom: 2px solid var(--accent); }
+  main h3 { font-size: 16px; margin: 24px 0 8px; }
+  main p, main li { font-size: 14px; }
+  main code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; font-size: 13px; }
+  main pre { background: var(--code-bg); padding: 12px 14px; border-radius: 6px;
+             overflow-x: auto; font-size: 12.5px; line-height: 1.45; }
+  main pre code { background: transparent; padding: 0; }
+  main a { color: var(--accent); text-decoration: none; }
+  main a:hover { text-decoration: underline; }
+  blockquote { border-left: 3px solid var(--accent); margin: 12px 0;
+               padding: 4px 14px; background: var(--accent-bg);
+               font-size: 13.5px; color: #444; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0;
+          font-size: 13px; background: white; border: 1px solid var(--rule); }
+  th, td { padding: 8px 12px; border-bottom: 1px solid var(--rule);
+           text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); font-weight: 600; font-size: 12px;
+       text-transform: uppercase; letter-spacing: .03em; }
+  tr:nth-child(even) td { background: #fcfcfc; }
+  tr:hover td { background: #f6fbed; }
+  td.bad   { color: var(--bad);  }
+  td.good  { color: var(--good); }
+  td.ok    { color: var(--ok);   }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px;
+          font-size: 11px; font-weight: 600; letter-spacing: .03em;
+          text-transform: uppercase; }
+  .pill.good { background: var(--good-bg); color: var(--good); }
+  .pill.ok   { background: var(--ok-bg);   color: var(--ok); }
+  .pill.bad  { background: var(--bad-bg);  color: var(--bad); }
+  .pill.merged { background: var(--accent-bg); color: var(--accent); }
+  .hero { background: linear-gradient(135deg, #ffffff 0%, var(--accent-bg) 100%);
+          border: 1px solid var(--rule); border-radius: 10px;
+          padding: 16px 20px; margin: 16px 0 28px; }
+  .hero h3 { margin: 0 0 6px; font-size: 13px; text-transform: uppercase;
+             letter-spacing: .05em; color: var(--accent); }
+  .hero p  { margin: 4px 0; }
+  .twocol { display: grid; gap: 18px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 900px) { .twocol { grid-template-columns: 1fr; } .layout { grid-template-columns: 1fr; } }
+  .src { color: var(--muted); font-size: 12px; margin-top: -6px; }
+  details { margin: 10px 0; background: white; border: 1px solid var(--rule);
+            border-radius: 6px; padding: 8px 14px; }
+  details > summary { cursor: pointer; font-weight: 600; color: var(--accent); padding: 4px 0; }
+  details[open] > summary { margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#tldr">TL;DR</a></li>
+    <li><a href="#current">Current state in main</a></li>
+    <li><a href="#pr12947">PR #12947 — pattern already merged</a></li>
+    <li><a href="#sage-today">Existing Sage hooks in backend</a></li>
+    <li><a href="#refined">Refined YAML design</a></li>
+    <li><a href="#deltas">Deltas vs raw draft</a></li>
+    <li><a href="#pydantic">Pydantic skeleton</a></li>
+    <li><a href="#sparse-path">What <code>sparse_config_path</code> is for</a></li>
+    <li><a href="#open">Open questions</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<h1>Visual-Gen Attention YAML — Design Refinement</h1>
+<p class="src">
+  Scope: user-facing CLI/YAML for quantized + sparse attention algorithms in
+  <code>tensorrt_llm/_torch/visual_gen</code>. Grounded in
+  <a href="https://github.com/NVIDIA/TensorRT-LLM/pull/12947">PR #12947 (SkipSoftmax)</a>
+  and existing SageAttention hooks already in the backend.
+</p>
+
+<div class="hero">
+  <h3>TL;DR</h3>
+  <p id="tldr">
+    Adopt PR #12947's pattern verbatim for the new Sage knobs:
+    add a sibling <code>quant_attention_config</code> sub-block under
+    <code>attention</code>, with a Pydantic discriminated Union on the
+    <code>algorithm</code> field (mirroring the existing
+    <code>sparse_attention_config</code>). Keep the
+    top-level <code>quant_config:</code> reserved for linear-layer weight /
+    activation quant (FP8 / NVFP4) — do not overload that name inside
+    <code>attention</code>.
+  </p>
+</div>
+
+<h2 id="current">1. Current state in main</h2>
+<p>
+  Today the user-facing <code>AttentionConfig</code> (<code>tensorrt_llm/_torch/visual_gen/config.py</code>)
+  is a single literal:
+</p>
+<pre><code>class AttentionConfig(StrictBaseModel):
+    backend: Literal["VANILLA", "TRTLLM", "FA4", "MXFP8_CUDNN"] = "VANILLA"</code></pre>
+<p>
+  There is no surface for SageAttention or sparse attention.
+  Backend names map to:
+</p>
+<table>
+  <thead><tr><th>Name</th><th>Module</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>VANILLA</code></td><td><code>attention_backend/vanilla.py</code></td><td>PyTorch SDPA fallback</td></tr>
+    <tr><td><code>TRTLLM</code></td><td><code>attention_backend/trtllm.py</code></td><td>C++ kernel, hosts Sage + SkipSoftmax knobs</td></tr>
+    <tr><td><code>FA4</code></td><td><code>attention_backend/flash_attn4.py</code></td><td>CuTe-DSL Flash-Attention-4 (do <em>not</em> rename to <code>CUTEDSL</code>)</td></tr>
+    <tr><td><code>MXFP8_CUDNN</code></td><td><code>attention_backend/mxfp8_cudnn.py</code></td><td>cuDNN SDPA-MXFP8, sm100+ self-attn</td></tr>
+  </tbody>
+</table>
+
+<h2 id="pr12947">2. PR #12947 — the pattern already merged</h2>
+<p>
+  <span class="pill merged">precedent</span>
+  The SkipSoftmax PR establishes a discriminated-union sub-config under
+  <code>attention</code>:
+</p>
+<pre><code>attention:
+  backend: TRTLLM
+  sparse_attention_config:           # discriminated Union via `algorithm`
+    algorithm: skip_softmax
+    threshold_scale_factor: 5000.0
+    target_sparsity: 0.7
+    formula: { a: 0.0003, b: 7.5 }   # log-space form: { log_a, b }
+    layer_overrides:
+      "transformer_blocks.0*": 0     # 0 disables sparsity on matching layers
+  sparse_config_path: /opt/ckpt/sparse.yaml   # optional path-based override</code></pre>
+<p>
+  Backend coupling is enforced by validation in
+  <code>modules/attention.py</code>, not by hierarchy:
+</p>
+<pre><code>if isinstance(ss_cfg, SkipSoftmaxConfig) and backend_name == "TRTLLM":
+    ...</code></pre>
+<p class="src">Cross-attention falls back to VANILLA because the TRT-LLM C++ kernel requires fused QKV.</p>
+
+<h2 id="sage-today">3. Existing Sage hooks in the backend</h2>
+<p>
+  <code>tensorrt_llm/_torch/visual_gen/attention_backend/trtllm.py</code>
+  and <code>_torch/attention_backend/interface.py</code> already accept these
+  per-layer parameters — the YAML just doesn't expose them yet:
+</p>
+<table>
+  <thead><tr><th>C++/Python param</th><th>Type</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>sage_attn_num_elts_per_blk_q</code></td><td>int</td><td>Per-block dynamic-quant granularity for Q (0 = disabled)</td></tr>
+    <tr><td><code>sage_attn_num_elts_per_blk_k</code></td><td>int</td><td>Per-block granularity for K</td></tr>
+    <tr><td><code>sage_attn_num_elts_per_blk_v</code></td><td>int</td><td>Per-block granularity for V</td></tr>
+    <tr><td><code>sage_attn_qk_int8</code></td><td>bool</td><td>int8 QK<sup>T</sup> path (else FP8)</td></tr>
+  </tbody>
+</table>
+
+<h2 id="refined">4. Refined YAML design</h2>
+<pre><code>attention:
+  backend: VANILLA | TRTLLM | FA4 | MXFP8_CUDNN
+
+  # (A) Quant-attention: changes numerics of QK^T / PV via per-block quant.
+  # Orthogonal to top-level `quant_config:` (which handles LINEAR layers).
+  quant_attention_config:           # discriminated Union via `algorithm`
+    algorithm: sage                 # sage | sage2 | fp4_attn (future) ...
+    q_block_size: 64                # was your `q_ele`
+    k_block_size: 64
+    v_block_size: 256
+    qk_int8: true                   # int8 QK^T path; false => fp8
+    layer_overrides:                # fnmatch pattern -> enable/disable
+      "*cross_attn*": false
+
+  # (B) Sparse-attention (merged in PR #12947, unchanged).
+  sparse_attention_config:
+    algorithm: skip_softmax
+    threshold_scale_factor: 5000.0
+    target_sparsity: 0.7
+    formula: { a: 0.0003, b: 7.5 }
+    layer_overrides: { "transformer_blocks.0*": 0 }
+  sparse_config_path: null
+  quant_attention_config_path: null  # reserved for future ModelOpt-emitted sage.yaml
+</code></pre>
+
+<h2 id="deltas">5. Deltas vs your raw draft</h2>
+<table>
+  <thead><tr><th>Your draft</th><th>Refined</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>attention.quant_config:</code></td>
+      <td><code>attention.quant_attention_config:</code></td>
+      <td>Top-level <code>quant_config:</code> already exists for linear-layer weight/activation quant (FP8 / NVFP4 / FP8_BLOCK_SCALES). Reusing the same key inside <code>attention</code> makes log lines and code search ambiguous. Distinct key, distinct scope.</td>
+    </tr>
+    <tr>
+      <td><code>algo: SAGE</code></td>
+      <td><code>algorithm: sage</code> (Pydantic discriminator)</td>
+      <td>Matches PR #12947's <code>algorithm: skip_softmax</code>. Lowercase + <code>algorithm</code> keeps both configs visually parallel; <code>Annotated[Union[...], discriminator="algorithm"]</code> validates them identically.</td>
+    </tr>
+    <tr>
+      <td><code>q_ele: 1, k_ele: 4, v_ele: 1</code></td>
+      <td><code>q_block_size</code>, <code>k_block_size</code>, <code>v_block_size</code></td>
+      <td>The C++ kernel parameter is literally <code>sage_attn_num_elts_per_blk_q</code> — "elements per block" = block size. <code>q_ele=1</code> reads as "1 element per block" (useless) or "the 1st element" — nobody can tell. Be explicit.</td>
+    </tr>
+    <tr>
+      <td><code>int8: True</code></td>
+      <td><code>qk_int8: true</code></td>
+      <td>The flag only controls the QK<sup>T</sup> int8 path (V keeps its own dtype). Plain <code>int8</code> reads as "everything int8." Match the C++ name <code>sage_attn_qk_int8</code>.</td>
+    </tr>
+    <tr>
+      <td>top-level <code>sparse_config:</code></td>
+      <td><code>attention.sparse_attention_config:</code></td>
+      <td>PR #12947 already nested it under <code>attention</code> — it's a property of attention, validated jointly with <code>backend</code>.</td>
+    </tr>
+    <tr>
+      <td><code>backend: CUTEDSL</code></td>
+      <td><code>backend: FA4</code></td>
+      <td>The CuTe-DSL attention is already exposed as <code>FA4</code> (<code>attention_backend/flash_attn4.py</code>). Use the name that exists.</td>
+    </tr>
+    <tr>
+      <td>(no layer overrides for Sage)</td>
+      <td><code>layer_overrides: {pattern: bool}</code></td>
+      <td>SkipSoftmax has them; symmetric ergonomics. In WAN cross-attn is only 0.45 % of runtime — disabling Sage there is a common operation.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="backend-coupling">Don't hard-code backend coupling in the hierarchy</h3>
+<p>
+  Sage and SkipSoftmax are TRTLLM-only today. Resist nesting them under the
+  backend (e.g. <code>attention.trtllm.sage:</code>) — that breaks when you
+  flip backends to experiment. Instead, add a single
+  <code>@model_validator(mode="after")</code> on <code>AttentionConfig</code>
+  that raises if either sub-config is set with <code>backend != "TRTLLM"</code>.
+  This is what PR #12947 does.
+</p>
+
+<h2 id="pydantic">6. Pydantic skeleton</h2>
+<pre><code>class SageConfig(StrictBaseModel):
+    algorithm: Literal["sage"] = "sage"
+    q_block_size: int = PydanticField(64, gt=0)
+    k_block_size: int = PydanticField(64, gt=0)
+    v_block_size: int = PydanticField(256, gt=0)
+    qk_int8: bool = True
+    layer_overrides: Optional[Dict[str, bool]] = None   # pattern -&gt; enable/disable
+
+
+QuantAttentionConfig = Annotated[
+    Union[SageConfig],                    # SageV2Config, FP4AttnConfig, ... later
+    PydanticField(discriminator="algorithm"),
+]
+
+
+class AttentionConfig(StrictBaseModel):
+    backend: Literal["VANILLA", "TRTLLM", "FA4", "MXFP8_CUDNN"] = "VANILLA"
+
+    quant_attention_config:        Optional[QuantAttentionConfig]  = None
+    sparse_attention_config:       Optional[SparseAttentionConfig] = None   # PR #12947
+    sparse_config_path:            Optional[str] = None
+    quant_attention_config_path:   Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_backend_coupling(self):
+        if (self.quant_attention_config or self.sparse_attention_config) \
+                and self.backend != "TRTLLM":
+            raise ValueError(
+                "quant/sparse attention algos currently require backend=TRTLLM"
+            )
+        return self</code></pre>
+
+<h2 id="sparse-path">7. What <code>sparse_config_path</code> is for</h2>
+<p>
+  It's the <strong>override pointer at a ModelOpt-emitted calibration YAML</strong>.
+  Three things to know:
+</p>
+
+<h3>7.1 File format expected on disk</h3>
+<p>
+  <code>load_sparse_config_from_yaml</code> (in
+  <code>tensorrt_llm/_torch/visual_gen/config.py</code>) expects
+  ModelOpt's diffusion-sparsity calibration format — not a hand-rolled
+  schema:
+</p>
+<pre><code>config_groups:
+  group_0:
+    sparse_algo: softmax_skip
+    targets: [WanAttention]
+    threshold_scale_factor:
+      formula: log_a + b * target_sparsity
+      prefill: {log_a: -14.14, b: 36.64}
+    disabled_layers: [blocks.0.attn1, blocks.0.attn2, blocks.39.attn2]</code></pre>
+<p class="src">Source: <code>test_load_modelopt_yaml</code> fixture in PR #12947.</p>
+
+<h3>7.2 Resolution priority (4 possible sources)</h3>
+<p>
+  When the pipeline loads, there are four ways a SkipSoftmax config can show
+  up. They are resolved in this order:
+</p>
+<table>
+  <thead><tr><th>#</th><th>Source</th><th>Role</th><th>Wins over</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><code>attention.sparse_config_path</code> (this field)</td><td>Base: formula + disabled-layers</td><td>auto-detected YAML, embedded config.json</td></tr>
+    <tr><td>2</td><td>Auto-detected <code>sparse.yaml</code> / <code>sparse.&lt;component&gt;.yaml</code> in checkpoint dir</td><td>Base</td><td>embedded config.json</td></tr>
+    <tr><td>3</td><td><code>sparse_attention_config</code> embedded in <code>config.json</code></td><td>Base</td><td>—</td></tr>
+    <tr><td>4</td><td><code>attention.sparse_attention_config:</code> in user YAML</td><td><b>Overrides</b> the base via <code>model_copy(update=...)</code></td><td>all of the above (per-field merge)</td></tr>
+  </tbody>
+</table>
+<p>
+  In one line: file-based sources provide the
+  <em>calibration formula + disabled layers</em>; the user's YAML provides the
+  <em>operating point</em> (<code>target_sparsity</code> /
+  <code>threshold_scale_factor</code> / extra <code>layer_overrides</code>) and
+  wins on conflicts via per-field merge.
+</p>
+<pre><code>yaml_path = attention_cfg.sparse_config_path
+if yaml_path is not None: yaml_sparse = load_sparse_config_from_yaml(yaml_path)
+if yaml_sparse is None: yaml_sparse = auto_detect_sparse_yaml(...)
+if yaml_sparse is None: yaml_sparse = auto_detect_sparse_attention_config(ckpt_dict)
+if yaml_sparse is not None:
+    user_cfg = attention_cfg.sparse_attention_config
+    if user_cfg is not None and isinstance(user_cfg, SkipSoftmaxConfig):
+        merged = yaml_sparse.model_copy(update={...user_cfg fields...})</code></pre>
+
+<h3>7.3 When would you actually set it?</h3>
+<ul>
+  <li>The calibration <code>sparse.yaml</code> ModelOpt emitted lives
+      <em>outside</em> the checkpoint dir (e.g. shared calibration cache).</li>
+  <li>The filename doesn't match the strict glob
+      (<code>sparse.yaml</code> / <code>sparse.*.yaml</code>) — e.g. you renamed it
+      <code>my_calibration_v2.yaml</code>.</li>
+  <li>You want a deterministic CI run that pins the calibration explicitly
+      and doesn't depend on dir-scan ordering.</li>
+  <li>You're A/B-comparing two calibrations against the same checkpoint.</li>
+</ul>
+<p>
+  Otherwise, leave it null and let auto-detect do its job.
+</p>
+
+<h3>7.4 The analogue for Sage</h3>
+<p>
+  Sage has no calibration-emitted YAML convention today, but it likely
+  will (per-layer block sizes are a calibration output). Reserve
+  <code>attention.quant_attention_config_path: Optional[str]</code>
+  now so the future auto-detect path doesn't force a YAML schema change.
+</p>
+
+<h2 id="open">8. Open questions</h2>
+<ol>
+  <li>
+    <b>Can Sage + SkipSoftmax run in the same model?</b> The YAML allows it,
+    but the C++ kernel needs to support both simultaneously. Need to
+    confirm with the kernel owner (or test on a small model).
+  </li>
+  <li>
+    <b>Per-layer block sizes for Sage?</b> Today
+    <code>layer_overrides</code> is <code>Dict[str, bool]</code>
+    (enable/disable). If calibration produces per-layer
+    <em>granularity</em>, we'd lift it to <code>Dict[str, SageLayerOverride]</code>
+    with optional block-size overrides. Plumb the schema now if we expect
+    that within a release.
+  </li>
+  <li>
+    <b>FA4 / cuTe attention support for these algorithms?</b> If FA4 grows a
+    Sage/SkipSoftmax path, the <code>_validate_backend_coupling</code>
+    validator becomes a per-algorithm allow-list:
+    <code>SageConfig.supported_backends: ClassVar = ("TRTLLM",)</code>.
+  </li>
+  <li>
+    <b>Default block sizes.</b> SageAttention paper defaults are
+    <code>q=k=64, v=256</code>; confirm this is the sweet spot on B200 for
+    WAN before baking them in.
+  </li>
+</ol>
+
+</main>
+</div>
+</body>
+</html>
