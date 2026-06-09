@@ -80,6 +80,46 @@ def _mxfp8_supported() -> bool:
 
 # --- TE quantization helpers ---------------------------------------------------
 
+# Max rows the TE MXFP8 quantize CUDA kernel can launch in one call. At B=2/S=75600
+# the pre-padded (B*H*s_pad, 128) tensor is ~6.05M rows and the kernel aborts with
+# "CUDA Error: invalid argument" (a launch/indexing limit; B=1 ~3.03M rows works).
+# We chunk along whole (B*H) groups -- chunk boundaries land on s_padded (a multiple
+# of 128), so the per-row (rowwise Q/K) and per-32-row-block (columnwise V) MXFP8
+# results are bit-identical to the unchunked call. Overridable for testing.
+_MAX_QUANT_ROWS = int(os.environ.get("TRTLLM_VISUAL_GEN_MXFP8_MAX_QUANT_ROWS", str(3_000_000)))
+
+
+def _te_mxfp8_quantize_2d(x2d: torch.Tensor, s_padded: int, rowwise: bool):
+    """MXFP8-quantize a pre-padded (L*s_padded, d_padded) tensor.
+
+    Chunks along whole (B*H) groups when the row count would crash the TE kernel.
+    rowwise=True -> Q/K (quantized along D); rowwise=False -> V (columnwise, along S).
+    """
+    MXFP8Quantizer = _TE_QUANTIZER
+    tex = _TEX
+
+    def _quant(sub: torch.Tensor):
+        quantizer = MXFP8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=not rowwise
+        )
+        quantizer.optimize_for_gemm = True
+        r = quantizer(sub)
+        data = r._rowwise_data if rowwise else r._columnwise_data
+        sf = r._rowwise_scale_inv if rowwise else r._columnwise_scale_inv
+        return data, sf
+
+    total_rows = x2d.shape[0]
+    if total_rows <= _MAX_QUANT_ROWS:
+        return _quant(x2d)
+    chunk_L = max(1, _MAX_QUANT_ROWS // s_padded)
+    chunk_rows = chunk_L * s_padded
+    datas, sfs = [], []
+    for start in range(0, total_rows, chunk_rows):
+        d, s = _quant(x2d[start : start + chunk_rows].contiguous())
+        datas.append(d)
+        sfs.append(s)
+    return torch.cat(datas, dim=0), torch.cat(sfs, dim=0)
+
 
 def _quantize_q_or_k_along_d(x_bhsd: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize Q or K (BHSD bf16/half) along the D axis (rowwise).
@@ -110,17 +150,14 @@ def _quantize_q_or_k_along_d(x_bhsd: torch.Tensor) -> Tuple[torch.Tensor, torch.
         x = torch.nn.functional.pad(x, (0, pad_d, 0, pad_s))
     x2d = x.reshape(L * s_padded, d_padded)
 
-    quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
-    quantizer.optimize_for_gemm = True
-    res = quantizer(x2d)
+    data, sf = _te_mxfp8_quantize_2d(x2d, s_padded, rowwise=True)  # sf: raw uint8 F8_128x4
 
     fp8 = (
-        res._rowwise_data.reshape(L, s_padded, d_padded)[:, :S, :D]
+        data.reshape(L, s_padded, d_padded)[:, :S, :D]
         .contiguous()
         .view(torch.float8_e4m3fn)
         .reshape(B, H, S, D)
     )
-    sf = res._rowwise_scale_inv  # raw uint8 in F8_128x4 layout
     return fp8, sf
 
 
@@ -147,17 +184,14 @@ def _quantize_v_along_s(x_bhsd: torch.Tensor) -> Tuple[torch.Tensor, torch.Tenso
         x = torch.nn.functional.pad(x, (0, pad_d, 0, pad_s))
     x2d = x.reshape(L * s_padded, d_padded)
 
-    quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=False, columnwise=True)
-    quantizer.optimize_for_gemm = True
-    res = quantizer(x2d)
+    data, sf = _te_mxfp8_quantize_2d(x2d, s_padded, rowwise=False)
 
     fp8 = (
-        res._columnwise_data.reshape(L, s_padded, d_padded)[:, :S, :D]
+        data.reshape(L, s_padded, d_padded)[:, :S, :D]
         .contiguous()
         .view(torch.float8_e4m3fn)
         .reshape(B, H, S, D)
     )
-    sf = res._columnwise_scale_inv
     return fp8, sf
 
 
@@ -334,25 +368,24 @@ class MXFP8CudnnAttention(AttentionBackend):
     ) -> torch.Tensor:
         is_causal = attention_mask == PredefinedAttentionMask.CAUSAL
         same_seq_len = k.shape[2] == q.shape[2] and v.shape[2] == q.shape[2]
-        if (
-            not self._enabled
-            or is_causal  # MXFP8 path here is built without causal mask; punt
-            or not same_seq_len  # cross-attention -> bf16 fallback
-            or q.dtype not in (torch.bfloat16, torch.float16)
+        # Cross-attention (q/kv seq differ), causal, or non-fp16/bf16 cannot use the
+        # self-attention MXFP8 graph and run bf16 -- this is architectural and is
+        # ALSO bf16 in the VANILLA backend, so it cancels in any MXFP8-vs-VANILLA
+        # comparison. It is an explicit, counted path, NOT a silent failure mask.
+        if not self._enabled or is_causal or not same_seq_len or q.dtype not in (
+            torch.bfloat16,
+            torch.float16,
         ):
             self.fallback_calls += 1
-            self._per_call_log(q, "fallback_dispatch")
+            self._per_call_log(q, "cross_or_unsupported_bf16")
             return F.scaled_dot_product_attention(q, k, v, is_causal=is_causal, scale=self.scale)
-        try:
-            out = self._mxfp8_forward(q, k, v)
-            self.mxfp8_calls += 1
-            self._per_call_log(q, "mxfp8")
-            return out
-        except Exception as e:
-            # On any failure (graph build, exec), fall back transparently.
-            self.fallback_calls += 1
-            self._per_call_log(q, f"fallback_exception:{type(e).__name__}")
-            return F.scaled_dot_product_attention(q, k, v, is_causal=False, scale=self.scale)
+        # Self-attention: NO silent fallback. Real MXFP8 runs or this raises loudly,
+        # so a generated "MXFP8" video can never be secretly bf16. (Deleted the old
+        # `except -> bf16` mask that hid the B=2/S=75600 TE-quantizer crash at 720p.)
+        out = self._mxfp8_forward(q, k, v)
+        self.mxfp8_calls += 1
+        self._per_call_log(q, "mxfp8")
+        return out
 
     def _per_call_log(self, q, path):
         path_var = os.environ.get(self._per_call_trace_env)
