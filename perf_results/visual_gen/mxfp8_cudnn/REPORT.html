@@ -174,6 +174,37 @@
 
 <main>
 <h1>MXFP8 cuDNN SDPA on Wan2.2 T2V-A14B (B200)</h1>
+<div style="border:2px solid var(--bad); background:var(--bad-bg); border-radius:8px; padding:14px 18px; margin:16px 0 24px;">
+  <div style="font-weight:700; color:var(--bad); font-size:15px; margin-bottom:6px;">
+    ⚠ CORRECTION — 2026-06-09: the 720p/81f MXFP8 accuracy numbers in this report are INVALID
+  </div>
+  <p style="font-size:13.5px; margin:6px 0;">
+    The cuDNN <code>sdpa_mxfp8</code> path <strong>throws a <code>RuntimeError</code> on every
+    self-attention call at the 720p/81f production shape (<code>B=2, S=75600</code>) and silently
+    falls back to bf16 SDPA</strong> — the byte-identical call the VANILLA reference uses. My own
+    committed per-call trace for <code>run_720p_81f</code> shows
+    <strong>16,160 <code>fallback_exception:RuntimeError</code> and 0 <code>path=mxfp8</code></strong>
+    at S=75600. So every "720p MXFP8" accuracy figure below (§4/§5 single-prompt and the 720p column
+    of the prompt matrix) measured <strong>bf16-vs-bf16 noise</strong>, not FP8.
+  </p>
+  <ul style="font-size:13.5px; margin:6px 0 4px; padding-left:20px;">
+    <li><strong>Perf (1.26× at S=75600, §3b/§4) is real but B=1 only.</strong> The microbench ran
+      <code>B=1</code> where the kernel executes; the real Wan run batches CFG to <code>B=2</code>,
+      where it throws. <em>(The "Self-attn shape … B=1" line below is wrong for the real run — it is
+      B=2.)</em> So perf and accuracy ran <strong>different kernels</strong>.</li>
+    <li><strong>480p/33f (S=14040) is the one valid MXFP8 config</strong> — its trace shows 16,480
+      genuine <code>path=mxfp8</code> calls. Its LPIPS (0.1375) is the real, and higher/worse,
+      FP8 number.</li>
+    <li>Sage results and the "K-block depends on S" headline are <strong>unaffected</strong>
+      (Sage does not use cuDNN <code>sdpa_mxfp8</code>).</li>
+  </ul>
+  <p style="font-size:13px; margin:6px 0 0; color:#555;">
+    Root cause &amp; evidence:
+    <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/repro/FINDINGS_silent_fallback.md">FINDINGS_silent_fallback.md</a>.
+    Likely a B-dependent int32 overflow (bf16 output is 3.1&nbsp;GB at B=2 vs 1.5&nbsp;GB at B=1).
+    Live error-text capture + the <code>torch.ops.trtllm.mxfp8_quantize</code> fix are pending a B200.
+  </p>
+</div>
 <dl class="meta">
   <dt>Date</dt><dd>2026-05-08 (study), 2026-05-11 (HTML render)</dd>
   <dt>Hardware</dt><dd>umbriel-b200-043 (8× B200 / sm_100), single-GPU run.</dd>

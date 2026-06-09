@@ -112,6 +112,28 @@ details > summary { cursor: pointer; font-weight: 600; color: var(--accent); pad
 </nav>
 <main>
 <h1>Multi-prompt accuracy — MXFP8 vs Sage on Wan2.2 T2V-A14B</h1>
+<div style="border:2px solid var(--bad); background:var(--bad-bg); border-radius:8px; padding:14px 18px; margin:16px 0 24px;">
+  <div style="font-weight:700; color:var(--bad); font-size:15px; margin-bottom:6px;">
+    ⚠ CORRECTION — 2026-06-09: the MXFP8 column at 720p/81f is INVALID (silent bf16 fallback)
+  </div>
+  <p style="font-size:13.5px; margin:6px 0;">
+    At the 720p/81f shape (<code>B=2, S=75600</code>) the cuDNN <code>sdpa_mxfp8</code> kernel
+    <strong>throws a <code>RuntimeError</code> on every self-attention call and silently falls back
+    to bf16</strong> — the same call VANILLA uses. The committed per-call trace shows
+    <strong>16,160 <code>fallback_exception</code> / 0 <code>mxfp8</code></strong> at S=75600. So the
+    <strong>720p MXFP8 cells below are bf16-vs-bf16</strong> (≈0.10 LPIPS is a noise floor), not FP8.
+  </p>
+  <ul style="font-size:13.5px; margin:6px 0 4px; padding-left:20px;">
+    <li><strong>480p/33f MXFP8 cells are VALID</strong> — that trace has 16,480 genuine
+      <code>mxfp8</code> calls. (Note: real MXFP8 at 480p scores LPIPS 0.1375 — <em>worse</em> than
+      the bogus 720p 0.10, consistent with FP8 actually perturbing quality.)</li>
+    <li><strong>All Sage cells (both configs) are unaffected.</strong></li>
+  </ul>
+  <p style="font-size:13px; margin:6px 0 0; color:#555;">
+    Details:
+    <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/repro/FINDINGS_silent_fallback.md">FINDINGS_silent_fallback.md</a>.
+  </p>
+</div>
 <dl class="meta">
 <dt>Date</dt><dd>2026-05-12 (replaces 2026-05-11 under-stepped study; updated with full 480p/33f Sage row from 043)</dd>
 <dt>Hardware</dt><dd>umbriel-b200-027 (720p/81f sweep, 480p/33f MXFP8 + VANILLA) and umbriel-b200-043 (480p/33f Sage row, run after 027 freed up). Identical container snapshot and wheel on both hosts.</dd>
