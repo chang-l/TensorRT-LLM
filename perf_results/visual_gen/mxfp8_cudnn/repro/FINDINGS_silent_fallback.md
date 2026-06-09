@@ -11,8 +11,43 @@ it throws). The 480p/33f (S=14040) run is the one config where MXFP8 genuinely
 ran, and there it *does* perturb quality.
 
 Date: 2026-06-09. Evidence is from committed artifacts on branch
-`feature/mxfp8-sage-accuracy-study` (no live GPU needed — the B200 allocation
-expired at 10:01 mid-investigation; live error-message capture is still pending).
+`feature/mxfp8-sage-accuracy-study`. **LIVE-CONFIRMED on umbriel-b200-072
+(2026-06-09) — see §7, which corrected two of my root-cause guesses.**
+
+---
+
+## 0. LIVE confirmation (umbriel-b200-072, release:1.3.0rc6 + cuDNN 9.22 overlay)
+
+`repro/repro_mxfp8_fallback.py` swept B∈{1,2} × S∈{14040,75600}; full log:
+`repro/live_run_umbriel-b200-072.log`.
+
+| B | S | TE quantizer (orig backend) | torch.ops Q/K + TE V |
+|---|---|---|---|
+| 1 | 14040 | OK (rel_err vs bf16 0.32) | OK |
+| 2 | 14040 | OK (0.32) | OK |
+| 1 | 75600 | **OK** (0.32) | OK |
+| 2 | 75600 | **ERR** `quantize_mxfp8.cuh:679 CUDA Error: invalid argument` | **ERR** at `:693` (V) |
+
+**Root cause (corrected): the throw is inside *TransformerEngine's* MXFP8 quantize
+CUDA kernel, NOT cuDNN.** It is a CUDA launch/indexing limit hit at the large
+flattened row count — B=2/S=75600 quantizes a `(B·H·s_pad, 128)` = **(6,051,840,
+128)** tensor; B=1 (3,025,920 rows) stays under the limit and succeeds. Both my
+earlier guesses were **wrong**: (a) it's not a cuDNN-side rejection, and (b) the
+scale sizes all match exactly (TE == torch.ops == cuDNN-expected at every shape),
+so it is *not* an `optimize_for_gemm` over-padding / size-mismatch issue.
+
+**Colleague's fix confirmed (by isolation):** swapping only Q/K to
+`torch.ops.trtllm.mxfp8_quantize` moved the failure from `:679` (rowwise Q/K) to
+`:693` (columnwise V) — i.e. the TE quantize kernel is the culprit for *both* Q/K
+and V, so the fix works only by routing **all** of Q/K/V through TRT-LLM's op
+(which has no such limit). torch.ops Q/K also runs clean at B=1/S=75600.
+
+**Real MXFP8 attention error is large:** wherever the kernel actually runs, the
+attention *output* has **~0.32 relative error vs bf16** (0.29–0.32; torch.ops
+slightly lower than TE). Compounded over 40 layers × 40 steps this is more than
+enough to explain the visible 720p regression the colleague saw — and supports
+their softmax mantissa-sensitivity argument that MX's extra exponent range
+doesn't buy attention accuracy.
 
 ---
 

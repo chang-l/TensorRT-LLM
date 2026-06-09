@@ -201,8 +201,13 @@
   <p style="font-size:13px; margin:6px 0 0; color:#555;">
     Root cause &amp; evidence:
     <a href="https://sc.talos.nvidia.com/view/home/scratch.liuc_coreai/codes/trtllm-v3-wt-2/perf_results/visual_gen/mxfp8_cudnn/repro/FINDINGS_silent_fallback.md">FINDINGS_silent_fallback.md</a>.
-    Likely a B-dependent int32 overflow (bf16 output is 3.1&nbsp;GB at B=2 vs 1.5&nbsp;GB at B=1).
-    Live error-text capture + the <code>torch.ops.trtllm.mxfp8_quantize</code> fix are pending a B200.
+    <strong>LIVE-CONFIRMED 2026-06-09 (umbriel-b200-072):</strong> the throw is inside
+    <em>TransformerEngine's</em> MXFP8 quantize kernel (<code>quantize_mxfp8.cuh:679</code>,
+    <code>CUDA Error: invalid argument</code>) — a launch/indexing limit hit when quantizing the
+    (B·H·s_pad, 128) = (6,051,840, 128) tensor at B=2/S=75600; B=1 (3.0M rows) stays under it. NOT a
+    cuDNN rejection and NOT a scale-size mismatch (all scale sizes matched exactly). Fix:
+    <code>torch.ops.trtllm.mxfp8_quantize</code> for all of Q/K/V (confirmed). Real MXFP8 attention
+    output carries ~0.32 rel-err vs bf16 wherever it runs.
   </p>
 </div>
 <dl class="meta">

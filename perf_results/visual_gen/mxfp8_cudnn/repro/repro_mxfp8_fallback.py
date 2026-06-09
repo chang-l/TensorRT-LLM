@@ -116,6 +116,30 @@ def te_quantize_v_along_s(x_bhsd):
     return fp8, res._columnwise_scale_inv
 
 
+def trtllm_quantize_q_or_k_along_d(x_bhsd):
+    """Q/K rowwise (along D) via torch.ops.trtllm.mxfp8_quantize (the colleague's fix).
+
+    Feeds the SAME pre-padded x2d as the TE path so the swizzled scale size matches
+    cuDNN's expected B*H*s_pad*d_scale_padded. Quantizes along the last dim (D).
+    """
+    B, H_, S, D_ = x_bhsd.shape
+    L = B * H_
+    block = 32
+    d_scale_padded = ceil_div(ceil_div(D_, block), 4) * 4
+    d_padded = d_scale_padded * block
+    s_scale_padded = ceil_div(ceil_div(S, block), 4) * 4
+    s_padded = s_scale_padded * block
+    x = x_bhsd.reshape(L, S, D_)
+    pad_d = d_padded - D_
+    pad_s = s_padded - S
+    if pad_s or pad_d:
+        x = F.pad(x, (0, pad_d, 0, pad_s))
+    x2d = x.reshape(L * s_padded, d_padded).contiguous()
+    val, sf = torch.ops.trtllm.mxfp8_quantize(x2d, True, 32)  # (swizzled, alignment=32)
+    fp8 = val.reshape(L, s_padded, d_padded)[:, :S, :D_].contiguous().reshape(B, H_, S, D_)
+    return fp8, sf
+
+
 _UID_Q, _UID_K, _UID_V = 0, 1, 2
 _UID_SFQ, _UID_SFK, _UID_SFV = 5, 6, 7
 _UID_O, _UID_AMAX_O = 3, 12
@@ -198,7 +222,14 @@ def expected_sf_numels(B, S):
     return qk, v
 
 
-def run_once(B, S, quantizer="TE", verbose=False):
+def run_once(B, S, qk_quant="TE", verbose=False):
+    """Run one cuDNN sdpa_mxfp8 forward; qk_quant selects the Q/K quantizer.
+
+    'TE' = TransformerEngine MXFP8Quantizer (the original backend); 'trtllm' =
+    torch.ops.trtllm.mxfp8_quantize (colleague's fix). V always uses the TE
+    columnwise path (its swizzled layout is hard to match with the last-dim-only
+    torch.ops op), so this isolates whether the Q/K quantizer is the trigger.
+    """
     torch.manual_seed(42)
     dev = "cuda"
     scale = 1.0 / math.sqrt(D)
@@ -206,14 +237,25 @@ def run_once(B, S, quantizer="TE", verbose=False):
     k = torch.randn(B, H, S, D, dtype=torch.bfloat16, device=dev) * 0.5
     v = torch.randn(B, H, S, D, dtype=torch.bfloat16, device=dev) * 0.5
     try:
-        if quantizer == "TE":
+        if qk_quant == "TE":
             qf, sfq = te_quantize_q_or_k_along_d(q)
             kf, sfk = te_quantize_q_or_k_along_d(k)
-            vf, sfv = te_quantize_v_along_s(v)
+        elif qk_quant == "trtllm":
+            qf, sfq = trtllm_quantize_q_or_k_along_d(q)
+            kf, sfk = trtllm_quantize_q_or_k_along_d(k)
         else:
-            raise ValueError(quantizer)
+            raise ValueError(qk_quant)
+        vf, sfv = te_quantize_v_along_s(v)  # V always TE
         qk_exp, v_exp = expected_sf_numels(B, S)
         if verbose:
+            # Compare TE vs torch.ops scale-tensor size for Q/K against cuDNN's expectation.
+            te_qk = te_quantize_q_or_k_along_d(q)[1].numel()
+            to_qk = trtllm_quantize_q_or_k_along_d(q)[1].numel() if HAS_TRTLLM_OP else -1
+            print(
+                f"        Q/K sf numel: TE={te_qk:>12}  torch.ops={to_qk:>12}  "
+                f"cuDNN_expects={qk_exp:>12}  (TE {'==' if te_qk == qk_exp else '!='} expected, "
+                f"torch.ops {'==' if to_qk == qk_exp else '!='} expected)"
+            )
             print(
                 f"        sfq.numel={sfq.numel():>12}  expected_qk={qk_exp:>12}  "
                 f"{'MATCH' if sfq.numel() == qk_exp else 'MISMATCH'}"
@@ -252,15 +294,28 @@ def run_once(B, S, quantizer="TE", verbose=False):
 
 
 print("=" * 72)
-print("EXPERIMENT A : TE.MXFP8Quantizer  --  B x S sweep")
+print("EXPERIMENT A : TE.MXFP8Quantizer (the original backend) -- B x S sweep")
 print("=" * 72)
 for S in SHAPES:
     for B in BATCHES:
-        tag = f"B={B} S={S}"
-        print(f"[{tag}]  (verbose diagnostics)")
-        status, msg = run_once(B, S, "TE", verbose=True)
+        print(f"[B={B} S={S}]  (verbose diagnostics)")
+        status, msg = run_once(B, S, qk_quant="TE", verbose=True)
         print(f"    --> {status}: {msg}")
         print()
         sys.stdout.flush()
+
+print("=" * 72)
+print("EXPERIMENT B : colleague's fix -- torch.ops.trtllm.mxfp8_quantize for Q/K")
+print("(V kept on TE; isolates whether the Q/K scale tensor is what cuDNN rejects)")
+print("=" * 72)
+if not HAS_TRTLLM_OP:
+    print("  torch.ops.trtllm.mxfp8_quantize NOT available -- skipping Experiment B")
+else:
+    for S in SHAPES:
+        for B in BATCHES:
+            print(f"[B={B} S={S}  Q/K=torch.ops  V=TE]")
+            status, msg = run_once(B, S, qk_quant="trtllm", verbose=False)
+            print(f"    --> {status}: {msg}")
+            sys.stdout.flush()
 
 print("done.")
