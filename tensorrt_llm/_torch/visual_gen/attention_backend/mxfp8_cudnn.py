@@ -121,6 +121,34 @@ def _te_mxfp8_quantize_2d(x2d: torch.Tensor, s_padded: int, rowwise: bool):
     return torch.cat(datas, dim=0), torch.cat(sfs, dim=0)
 
 
+# Optional mean-subtraction along seqLen, env-gated for A/B testing.
+# Decompose K = vK + mK, where mK[b,h,d] = mean_s K[b,h,s,d] (the per-(B,H,D) seqLen
+# mean), and feed the centered residual vK = K - mK to the FP8 kernel (Q unchanged).
+# EXACTLY invariant: softmax_j(Q . vK[j]) == softmax_j(Q . K[j]) because Q.mK is a
+# per-query constant (cancels in softmax over keys). Centering removes K's per-channel
+# DC offset so the MX block scale covers a tighter range -> better E4M3 mantissa use.
+# NOTE: centering Q is NOT done -- it would add a per-key cross-term mQ.vK[j] that does
+# NOT cancel, and cuDNN sdpa_mxfp8 exposes no bias input to inject it. So only "k".
+_MS_ENV = "TRTLLM_VISUAL_GEN_MXFP8_MEANSUB"  # "k" = center K over seqLen (the invariant case)
+_MS_LOGGED = False
+
+
+def _meansub_qk(q: torch.Tensor, k: torch.Tensor):
+    """Return (q, vK) with K mean-centered along seqLen iff env == 'k'; else passthrough."""
+    global _MS_LOGGED
+    mode = os.environ.get(_MS_ENV, "")
+    if mode != "k":
+        return q, k
+    mK = k.float().mean(dim=2, keepdim=True)  # mean over S (seqLen) -> (B, H, 1, D)
+    vK = (k.float() - mK).to(k.dtype)
+    if not _MS_LOGGED:
+        import sys
+
+        print("[MXFP8] mean-sub(K over seqLen) ACTIVE (QK^T-invariant)", file=sys.stderr, flush=True)
+        _MS_LOGGED = True
+    return q, vK
+
+
 # Optional SmoothQuant on the QK^T (Bmm1) matmul, env-gated for A/B testing.
 # Per-head (H), per-channel (D) scale s computed from current activation amax:
 #   s = amax_{B,S}(|Q|)^a / amax_{B,S}(|K|)^(1-a)  ;  Q' = Q/s, K' = K*s.
@@ -499,6 +527,7 @@ class MXFP8CudnnAttention(AttentionBackend):
             graph = _build_sdpa_mxfp8_graph(B, H, S, D, self.scale, self._cudnn_handle)
             self._graph_cache[key] = graph
 
+        q, k = _meansub_qk(q, k)  # optional, env-gated; K-centering, QK^T-invariant
         q, k = _smoothquant_qk(q, k)  # optional, env-gated; QK^T-invariant; V untouched
         q, k = _hadamard_qk(q, k)  # optional, env-gated; QK^T-invariant; V untouched
         qf, sfq = _quantize_q_or_k_along_d(q)
