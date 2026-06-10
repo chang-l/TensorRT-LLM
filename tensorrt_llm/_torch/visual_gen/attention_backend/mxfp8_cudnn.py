@@ -121,6 +121,87 @@ def _te_mxfp8_quantize_2d(x2d: torch.Tensor, s_padded: int, rowwise: bool):
     return torch.cat(datas, dim=0), torch.cat(sfs, dim=0)
 
 
+# Optional SmoothQuant on the QK^T (Bmm1) matmul, env-gated for A/B testing.
+# Per-head (H), per-channel (D) scale s computed from current activation amax:
+#   s = amax_{B,S}(|Q|)^a / amax_{B,S}(|K|)^(1-a)  ;  Q' = Q/s, K' = K*s.
+# This is EXACTLY invariant in QK^T (Q'.K'^T == Q.K^T per head), so only the FP8
+# quantization error changes -- never V, never the softmax math. a selects the
+# migration: a=0 normalizes K ("k"), a=0.5 balanced ("qk"), a=1 normalizes Q ("q").
+_SQ_ENV = "TRTLLM_VISUAL_GEN_MXFP8_SMOOTHQUANT"
+_SQ_ALPHA = {"k": 0.0, "qk": 0.5, "q": 1.0}
+_SQ_LOGGED = False
+
+
+def _smoothquant_qk(q: torch.Tensor, k: torch.Tensor):
+    """Return (q', k') with per-head per-channel SmoothQuant applied iff env set."""
+    global _SQ_LOGGED
+    mode = os.environ.get(_SQ_ENV, "")
+    if not mode:
+        return q, k
+    if mode in _SQ_ALPHA:
+        alpha = _SQ_ALPHA[mode]
+    else:
+        try:
+            alpha = float(mode)
+        except ValueError:
+            return q, k
+    # q, k are (B, H, S, D). Per-head, per-channel amax over batch+seq -> (H, D).
+    aq = q.float().abs().amax(dim=(0, 2)).clamp(min=1e-6)
+    ak = k.float().abs().amax(dim=(0, 2)).clamp(min=1e-6)
+    s = (aq.pow(alpha) / ak.pow(1.0 - alpha)).clamp(min=1e-4, max=1e4).to(q.dtype)
+    s = s.unsqueeze(0).unsqueeze(2)  # (1, H, 1, D) broadcast over B, S
+    if not _SQ_LOGGED:
+        import sys
+
+        print(
+            f"[MXFP8] SmoothQuant ACTIVE: mode={mode} alpha={alpha} (per-head, QK^T-invariant)",
+            file=sys.stderr,
+            flush=True,
+        )
+        _SQ_LOGGED = True
+    return q / s, k * s
+
+
+# Optional Hadamard (Walsh) rotation on the D=head_dim axis, env-gated for A/B.
+# A normalized Sylvester-Hadamard R (D x D, symmetric, orthogonal: R@R == I) applied
+# identically to Q and K: Q' = Q@R, K' = K@R -> Q'.K'^T == Q.K^T exactly (invariant).
+# Unlike SmoothQuant's diagonal rescale, this DENSE rotation spreads per-channel
+# energy across D, lowering intra-32-block kurtosis so E4M3's 3 mantissa bits are
+# better used. Requires D to be a power of two (Wan D=128 ok). Env TRTLLM_VISUAL_GEN_MXFP8_HADAMARD=1.
+_HAD_ENV = "TRTLLM_VISUAL_GEN_MXFP8_HADAMARD"
+_HAD_CACHE: dict = {}
+_HAD_LOGGED = False
+
+
+def _hadamard_matrix(n: int, device, dtype):
+    cache_key = (n, str(device), dtype)
+    R = _HAD_CACHE.get(cache_key)
+    if R is None:
+        m = torch.ones(1, 1, dtype=torch.float32)
+        while m.shape[0] < n:
+            m = torch.cat([torch.cat([m, m], dim=1), torch.cat([m, -m], dim=1)], dim=0)
+        R = (m / (n**0.5)).to(device=device, dtype=dtype)  # normalized -> orthogonal
+        _HAD_CACHE[cache_key] = R
+    return R
+
+
+def _hadamard_qk(q: torch.Tensor, k: torch.Tensor):
+    """Return (q@R, k@R) with a shared orthogonal Hadamard R iff env set; else passthrough."""
+    global _HAD_LOGGED
+    if os.environ.get(_HAD_ENV, "0") != "1":
+        return q, k
+    D = q.shape[-1]
+    if D & (D - 1) != 0:  # not a power of two -> cannot build Hadamard, skip safely
+        return q, k
+    R = _hadamard_matrix(D, q.device, q.dtype)
+    if not _HAD_LOGGED:
+        import sys
+
+        print(f"[MXFP8] Hadamard rotation ACTIVE on D={D} (QK^T-invariant)", file=sys.stderr, flush=True)
+        _HAD_LOGGED = True
+    return q @ R, k @ R
+
+
 def _quantize_q_or_k_along_d(x_bhsd: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize Q or K (BHSD bf16/half) along the D axis (rowwise).
 
@@ -418,6 +499,8 @@ class MXFP8CudnnAttention(AttentionBackend):
             graph = _build_sdpa_mxfp8_graph(B, H, S, D, self.scale, self._cudnn_handle)
             self._graph_cache[key] = graph
 
+        q, k = _smoothquant_qk(q, k)  # optional, env-gated; QK^T-invariant; V untouched
+        q, k = _hadamard_qk(q, k)  # optional, env-gated; QK^T-invariant; V untouched
         qf, sfq = _quantize_q_or_k_along_d(q)
         kf, sfk = _quantize_q_or_k_along_d(k)
         vf, sfv = _quantize_v_along_s(v)
