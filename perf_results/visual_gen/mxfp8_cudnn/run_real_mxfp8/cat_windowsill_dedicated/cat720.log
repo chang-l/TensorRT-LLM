@@ -1,0 +1,12 @@
+=== Wed Jun 10 00:52:22 UTC 2026 host=umbriel-b200-027 — cat_windowsill 720p MXFP8 dedicated trace ===
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+overlaid patched backend
+backend fallback_exception count (want 0): 0
+[MXFP8] cat_windowsill gen=414.7s -> cat_windowsill_MXFP8.mp4
+[MXFP8] DONE — 1 prompts, summary -> /tmp/catonly720/prompts/summary_MXFP8.json
+=================== cat_windowsill 720p per-call trace (THIS PROMPT ONLY) ===================
+   2240 path=cross_or_unsupported_bf16
+   2240 path=mxfp8
+fallback_exception lines: 0
+mp4: 725650
+=== EXIT=0 done Wed Jun 10 01:07:18 UTC 2026 ===
