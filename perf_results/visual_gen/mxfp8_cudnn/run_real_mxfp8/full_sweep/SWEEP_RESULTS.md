@@ -36,3 +36,15 @@ text_hello         0.075  0.077  0.054   0.126  0.098
 
 Hadamard/combined help ~7/10 prompts but HURT cat_windowsill, text_hello, dancer_jump.
 Caveat: 480p, std large (~0.08); paired comparison. Mp4s in full_sweep/s{42,123,7}/.
+
+## Follow-up: mean-subtraction K-centering (MEANSUB=k), 3 seeds x 10 prompts
+Exactly QK^T-invariant (vK=K-mean_S(K), Q unchanged); real MXFP8, 0 fallback_exception.
+| seed | MXnone | MXmsK (mean-sub-K) | delta |
+|---|---|---|---|
+| 42  | 0.1350 | 0.1142 | -15% |
+| 123 | 0.1338 | 0.1625 | +21% (worse) |
+| 7   | 0.1233 | 0.1470 | +19% (worse) |
+| mean| 0.1307 | 0.1412 | +8% (NET WORSE) |
+VERDICT: does NOT help -- net +8% worse, seed-dependent (great on s42, bad on s123/s7).
+Likely the QK-RMSNorm already removes K's DC offset, so centering the residual just
+shrinks signal and worsens relative E4M3 error. Clean negative result.
