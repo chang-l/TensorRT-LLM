@@ -26,6 +26,20 @@ quantization error, not the attention math.
 | MXFP8 (none) | 0.3140 | 18.7 | — |
 | + **Hadamard** rotation | **0.2650** | 20.0 | **−16% (better)** |
 
+## flower_blooming 720p (follow-up, 1 prompt) — Hadamard is NOT universal
+
+| variant | LPIPS | PSNR | Δ vs baseline |
+|---|---|---|---|
+| MXFP8 (none) | 0.3495 | 16.6 | — |
+| + Hadamard | 0.3513 | 16.4 | **+0.5% (flat — no help)** |
+| + Hadamard + SmoothQuant-QK | **0.3156** | 17.2 | **−10% (helps)** |
+
+flower ("close-up red rose, fine petal detail") is a counterexample: **Hadamard alone
+does nothing for it** (its Q/K are likely already low-kurtosis, so the rotation has
+little to spread), whereas busy_street (−10%) and cat_windowsill (−22%) benefited.
+**Stacking SmoothQuant-QK on top recovers −10%** — the combined transform is more
+robust across prompts than either alone.
+
 ## Verdict
 
 - **Hadamard rotation works** — the staged-plan step-1. It cuts MXFP8↔bf16 LPIPS by
