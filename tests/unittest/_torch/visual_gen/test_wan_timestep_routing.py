@@ -20,14 +20,15 @@ pytestmark = pytest.mark.cpu_only
 
 @pytest.mark.parametrize(
     ("expand_timesteps", "expected_temb_shape"),
-    [(False, (2, 6, 8)), (True, (2, 3, 6, 8))],
+    [(False, (2, 6, 8)), (True, (2, 2, 6, 8))],
 )
 def test_uniform_timestep_modulation_routing(
     expand_timesteps: bool, expected_temb_shape: tuple[int, ...]
 ) -> None:
     """Wan 5B expands T2V modulation only after the condition embedder."""
     batch_size = 2
-    seq_len = 3
+    seq_len = 4
+    local_seq_len = 2
     hidden_size = 8
 
     model = WanTransformer3DModel.__new__(WanTransformer3DModel)
@@ -40,7 +41,11 @@ def test_uniform_timestep_modulation_routing(
     model.rope = mock.Mock(return_value=(torch.empty(0), torch.empty(0)))
     model.patch_embedding = torch.nn.Identity()
     model.sharder = mock.Mock()
-    model.sharder.shard.side_effect = lambda tensor, **_kwargs: tensor
+
+    def shard(tensor: torch.Tensor, dim: int = 1, **_kwargs: object) -> torch.Tensor:
+        return tensor.narrow(dim, 0, local_seq_len).contiguous()
+
+    model.sharder.shard.side_effect = shard
     model.sharder.shard_rope.return_value = None
     model.sharder.gather.side_effect = lambda tensor, **_kwargs: tensor
 
@@ -83,6 +88,11 @@ def test_uniform_timestep_modulation_routing(
     timestep_call = model.condition_embedder.call_args
     assert timestep_call.kwargs["timestep_seq_len"] is None
     torch.testing.assert_close(timestep_call.args[0], timestep * 1000)
+
+    shard_call = model.sharder.shard.call_args
+    assert model.sharder.shard.call_count == 1
+    assert shard_call.args[0].shape == (batch_size, seq_len, hidden_size)
+    assert shard_call.kwargs == {"dim": 1}
 
     runtime_call = model._pertoken_adaln_runtime.prepare.call_args
     assert runtime_call.args[1].shape == expected_temb_shape
