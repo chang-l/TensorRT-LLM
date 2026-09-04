@@ -625,7 +625,8 @@ def _run_reusable_video_lpips_eval(sample_id, reference_path, generated_path, sc
     return score
 
 
-def _assert_lpips_below_threshold(score, threshold, label=""):
+def _assert_lpips_below_threshold(score: float, threshold: float, label: str = "") -> None:
+    """Assert that an LPIPS score stays below its configured threshold."""
     context = f" [{label}]" if label else ""
     assert score < threshold, f"LPIPS too high{context}: {score:.6f} (expected < {threshold:.6f})"
 

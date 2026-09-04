@@ -17,7 +17,9 @@
 import glob
 import os
 import sys
-from typing import Callable
+from functools import cache
+from pathlib import Path
+from typing import Callable, TypedDict
 
 import pytest
 import torch
@@ -91,9 +93,30 @@ WAN_MULTI_GPU_REORDERED_WITHIN_BUILD_LPIPS_THRESHOLD = 0.30
 WAN_MULTI_GPU_GOLDEN_BACKSTOP_LPIPS_THRESHOLD = 0.32
 WAN22_MULTI_GPU_LPIPS_ATTENTION_BACKEND = "FA4"
 WAN22_MULTI_GPU_LPIPS_GOLDEN_VIDEO = "wan22_t2v_fa4_fully_eager_lpips_golden_video.mp4"
+
+
+class WanParallelConfig(TypedDict, total=False):
+    """Parallel settings exercised by the WAN2.2 LPIPS variants."""
+
+    cfg_size: int
+    ulysses_size: int
+    attn2d_size: tuple[int, int]
+    tp_size: int
+
+
+class WanReferenceWorkerKwargs(TypedDict):
+    """Arguments passed to the single-GPU reference spawn worker."""
+
+    model_path: str
+    reference_path: str
+
+
+WanReferenceFactory = Callable[[], Path]
+WanLpipsVariant = tuple[str, WanParallelConfig, float]
+
 # (variant name, parallel kwargs, within-build LPIPS bound) -- pick the bound
 # per the class rationale above when adding a variant.
-WAN22_LPIPS_MULTI_GPU_VARIANTS = [
+WAN22_LPIPS_MULTI_GPU_VARIANTS: list[WanLpipsVariant] = [
     ("ulysses4", {"ulysses_size": 4}, WAN_MULTI_GPU_EXACT_WITHIN_BUILD_LPIPS_THRESHOLD),
     (
         "cfg2_ulysses2",
@@ -113,7 +136,7 @@ WAN22_LPIPS_MULTI_GPU_VARIANTS = [
     ),
 ]
 
-WAN22_LPIPS_TP_VARIANTS = [
+WAN22_LPIPS_TP_VARIANTS: list[WanLpipsVariant] = [
     ("tp2", {"tp_size": 2}, WAN_MULTI_GPU_REORDERED_WITHIN_BUILD_LPIPS_THRESHOLD),
     ("tp3", {"tp_size": 3}, WAN_MULTI_GPU_REORDERED_WITHIN_BUILD_LPIPS_THRESHOLD),
     (
@@ -236,7 +259,12 @@ def _skip_if_insufficient_gpus_for_parallel(parallel):
         )
 
 
-def _wan22_reference_media_worker(rank, kwargs, tllm_site):
+def _wan22_reference_media_worker(
+    rank: int,
+    kwargs: WanReferenceWorkerKwargs,
+    tllm_site: str,
+) -> None:
+    """Generate the eager single-GPU reference in an isolated spawn worker."""
     # mp.spawn target: generate the fully-eager single-GPU reference in a child
     # process so the pytest parent stays CUDA-free for the distributed spawns.
     # Applies the same installed-wheel sys.path fix as _distributed_worker; no
@@ -264,38 +292,49 @@ def _wan22_reference_media_worker(rank, kwargs, tllm_site):
 
 
 @pytest.fixture(scope="session")
-def wan22_within_build_reference(tmp_path_factory):
-    """Fully-eager single-GPU WAN2.2 reference video cut at the current build.
+def wan22_within_build_reference(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> WanReferenceFactory:
+    """Return a lazy, session-cached factory for the current-build reference.
 
-    Session-scoped: one extra generation amortized over every multi-GPU/TP
-    variant in the session. Scoring each variant against this reference
-    (instead of only the frozen golden) isolates the parallelism invariant
-    from whole-build numerics drift: both sides of the comparison shift
-    together when bf16 numerics legitimately change (nvbug 6655990).
+    The first eligible multi-GPU/TP case generates the fully-eager single-GPU
+    WAN2.2 video; later cases reuse it. Deferring generation lets each case
+    perform its GPU-capacity skip before paying for the reference. Scoring
+    against this current-build reference isolates the parallelism invariant
+    from whole-build numerics drift (nvbug 6655990).
     """
-    try:
-        import tensorrt_llm.bindings as tllm_bindings
-    except ImportError:
-        pytest.skip("Required modules not available")
-    if torch.cuda.device_count() < 1:
-        pytest.skip("Within-build reference generation requires a GPU")
-    model_path = _lpips_model_path("Wan2.2-T2V-A14B-Diffusers")
-    _skip_if_missing(model_path, "Wan checkpoint", is_dir=True)
-    tllm_site = _validated_tllm_site(
-        os.path.dirname(os.path.dirname(os.path.abspath(tllm_bindings.__file__)))
-    )
-    reference_path = (
-        tmp_path_factory.mktemp("wan22_within_build_ref")
-        / "wan22_t2v_fa4_fully_eager_within_build_reference.mp4"
-    )
-    mp.spawn(
-        _wan22_reference_media_worker,
-        args=({"model_path": model_path, "reference_path": str(reference_path)}, tllm_site),
-        nprocs=1,
-        join=True,
-    )
-    assert reference_path.is_file(), f"Reference generation did not produce {reference_path}"
-    return reference_path
+
+    @cache
+    def generate_reference() -> Path:
+        try:
+            import tensorrt_llm.bindings as tllm_bindings
+        except ImportError:
+            pytest.skip("Required modules not available")
+        if torch.cuda.device_count() < 1:
+            pytest.skip("Within-build reference generation requires a GPU")
+        model_path = _lpips_model_path("Wan2.2-T2V-A14B-Diffusers")
+        _skip_if_missing(model_path, "Wan checkpoint", is_dir=True)
+        tllm_site = _validated_tllm_site(
+            os.path.dirname(os.path.dirname(os.path.abspath(tllm_bindings.__file__)))
+        )
+        reference_path = (
+            tmp_path_factory.mktemp("wan22_within_build_ref")
+            / "wan22_t2v_fa4_fully_eager_within_build_reference.mp4"
+        )
+        worker_kwargs = WanReferenceWorkerKwargs(
+            model_path=model_path,
+            reference_path=str(reference_path),
+        )
+        mp.spawn(
+            _wan22_reference_media_worker,
+            args=(worker_kwargs, tllm_site),
+            nprocs=1,
+            join=True,
+        )
+        assert reference_path.is_file(), f"Reference generation did not produce {reference_path}"
+        return reference_path
+
+    return generate_reference
 
 
 def _wan22_lpips_distributed_worker(rank: int, world_size: int, **kwargs) -> None:
@@ -332,9 +371,15 @@ def _wan22_lpips_distributed_worker(rank: int, world_size: int, **kwargs) -> Non
 
 
 def _run_wan22_t2v_lpips_case(
-    tmp_path, variant_name, parallel, within_build_reference, within_build_threshold
-):
+    tmp_path: Path,
+    variant_name: str,
+    parallel: WanParallelConfig,
+    within_build_reference_factory: WanReferenceFactory,
+    within_build_threshold: float,
+) -> None:
+    """Run one WAN2.2 parallel variant and enforce both LPIPS gates."""
     _skip_if_insufficient_gpus_for_parallel(parallel)
+    within_build_reference = within_build_reference_factory()
     parallel_cfg = _parallel_config(**parallel)
     generated_path = tmp_path / f"wan22_t2v_generated_{variant_name}.mp4"
     golden_path = _golden_media_path(
@@ -397,13 +442,14 @@ def _run_wan22_t2v_lpips_case(
     ids=[variant[0] for variant in WAN22_LPIPS_MULTI_GPU_VARIANTS],
 )
 def test_wan22_t2v_lpips_against_golden_multi_gpu(
-    _visual_gen_deps,
-    tmp_path,
-    variant_name,
-    parallel,
-    within_build_threshold,
-    wan22_within_build_reference,
-):
+    _visual_gen_deps: None,
+    tmp_path: Path,
+    variant_name: str,
+    parallel: WanParallelConfig,
+    within_build_threshold: float,
+    wan22_within_build_reference: WanReferenceFactory,
+) -> None:
+    """Check multi-GPU WAN2.2 output against current-build and golden references."""
     # Test name kept (test-db lists and waives.txt reference it); the primary
     # gate is now the within-build parallelism check, with the frozen golden
     # retained as a loose catastrophic backstop.
@@ -418,13 +464,14 @@ def test_wan22_t2v_lpips_against_golden_multi_gpu(
     ids=[variant[0] for variant in WAN22_LPIPS_TP_VARIANTS],
 )
 def test_wan22_t2v_lpips_against_golden_tp(
-    _visual_gen_deps,
-    tmp_path,
-    variant_name,
-    parallel,
-    within_build_threshold,
-    wan22_within_build_reference,
-):
+    _visual_gen_deps: None,
+    tmp_path: Path,
+    variant_name: str,
+    parallel: WanParallelConfig,
+    within_build_threshold: float,
+    wan22_within_build_reference: WanReferenceFactory,
+) -> None:
+    """Check tensor-parallel WAN2.2 output against current-build and golden references."""
     _run_wan22_t2v_lpips_case(
         tmp_path, variant_name, parallel, wan22_within_build_reference, within_build_threshold
     )
