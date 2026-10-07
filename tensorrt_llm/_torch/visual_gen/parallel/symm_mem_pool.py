@@ -23,10 +23,9 @@ identically on every rank and (c) allocated once, outside CUDA-graph capture.
 ``torch.distributed._symmetric_memory`` gives exactly that: ``empty`` + ``rendezvous`` return a
 handle whose ``get_buffer(peer, ...)`` is a tensor view of the peer's copy of the allocation and
 whose signal pad carries the ``put_signal`` / ``wait_signal`` flags that order a consumer's reads
-after a producer's copies. Nothing in the tree uses the pool yet: the first follow-up is the
-copy-engine all-gather of VisualGen's token-sharded tensor parallelism. Each
-:class:`SymmMemPool` is one allocation; a group may carry several (one per protocol), nothing
-ties a group to one.
+after a producer's copies. Its first user is the copy-engine all-gather of VisualGen's
+token-sharded tensor parallelism (``token_sharded_ce_gather``). Each :class:`SymmMemPool` is
+one allocation; a group may carry several (one per protocol), nothing ties a group to one.
 
 Layout
 ------
