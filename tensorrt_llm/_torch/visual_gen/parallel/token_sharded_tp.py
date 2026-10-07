@@ -17,10 +17,11 @@
 Megatron-style sequence parallelism inside the TP group: between projections each TP rank holds
 only its rows of the residual stream (:class:`TokenShardPlan`). Each row-parallel all-reduce
 becomes a reduce-scatter to those rows, and the next column-parallel projection all-gathers them
-first (as NVFP4 when that projection has a static NVFP4 input scale). Only row-local ops
-(residual adds, norms, modulation, quantization) run on the shard; attention, QK-norm and RoPE
-see all tokens, with heads sharded as in plain TP. This is not Ulysses / ring / attn2d, which
-shard the sequence through attention, and cannot be combined with them yet.
+first (as NVFP4 when that projection has a static NVFP4 input scale; the payload and its scaling
+factors travel in one coalesced collective). Only row-local ops (residual adds, norms, modulation,
+quantization) run on the shard; attention, QK-norm and RoPE see all tokens, with heads sharded as
+in plain TP. This is not Ulysses / ring / attn2d, which shard the sequence through attention, and
+cannot be combined with them yet.
 
 Numerics: the reduce-scatter may sum the K-partials in another order and with another NCCL
 algorithm than the all-reduce. At ``tp >= 8`` on NVSwitch systems NCCL's default runs the
@@ -237,6 +238,31 @@ def _wait(t: torch.Tensor) -> torch.Tensor:
 
 def _all_gather_rows(x_loc: torch.Tensor, group_name: str) -> torch.Tensor:
     return _wait(funcol.all_gather_single(x_loc.contiguous(), 0, group_name))
+
+
+def _all_gather_rows_coalesced(xs: list[torch.Tensor], group_name: str) -> list[torch.Tensor]:
+    """All-gather several row-sharded tensors in one collective.
+
+    Each ``[m_i, ...]`` input yields the ``[tp * m_i, ...]`` rank-major concatenation
+    that :func:`_all_gather_rows` would produce for it alone, in one launch (one NCCL
+    group) instead of one per tensor.
+
+    Inputs of different dtypes (e.g. an FP8 payload with its int32 scales) are gathered
+    as byte views and viewed back: a mixed-dtype call returns wrong data on gloo, and a
+    byte view moves the same bytes on every backend without a copy.
+    """
+    xs = [x.contiguous() for x in xs]
+    dtypes = [x.dtype for x in xs]
+    shapes = [x.shape for x in xs]
+    mixed = len(set(dtypes)) > 1
+    if mixed:
+        # Flattened first: a size-1 trailing dim may keep a non-unit stride through
+        # .contiguous(), and the dtype view needs stride(-1) == 1.
+        xs = [x.reshape(-1).view(torch.uint8) for x in xs]
+    outs = [_wait(o) for o in funcol.all_gather_single_coalesced(xs, group_name)]
+    if mixed:
+        outs = [o.view(dtype).view(-1, *shape[1:]) for o, dtype, shape in zip(outs, dtypes, shapes)]
+    return outs
 
 
 def _reduce_scatter_rows(y: torch.Tensor, group_name: str) -> torch.Tensor:
@@ -531,11 +557,14 @@ class TokenShardedTP:
         p = self.plan
         if isinstance(act_loc, Fp4QuantizedTensor):
             payload, sf, k = self._check_fp4(act_loc)
-            payload = self._drop_padding(_all_gather_rows(payload, self.group_name))
-            sf = regroup_swizzled_sf(
-                _all_gather_rows(sf, self.group_name), p, k // NVFP4_SF_VEC_SIZE
+            # One collective for both buffers: a block has three NVFP4 boundaries, so
+            # separate payload and scaling-factor gathers would double its launches.
+            payload, sf = _all_gather_rows_coalesced([payload, sf], self.group_name)
+            return Fp4QuantizedTensor(
+                self._drop_padding(payload),
+                regroup_swizzled_sf(sf, p, k // NVFP4_SF_VEC_SIZE),
+                is_sf_swizzled=True,
             )
-            return Fp4QuantizedTensor(payload, sf, is_sf_swizzled=True)
         self._check_local_rows("all_gather", act_loc)
         return self._drop_padding(_all_gather_rows(act_loc, self.group_name))
 
