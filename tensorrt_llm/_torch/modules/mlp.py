@@ -166,20 +166,21 @@ class MLP(nn.Module):
             return self.down_proj(self._fused_gelu(x))
 
         if self._unquantized_gelu_fusion_eligible(x):
-            x_act = self._fused_up_proj_gelu(x)
+            return self.down_proj(self._fused_up_proj_gelu(x))
+        return self._down_from_up(self.up_proj(x))
+
+    def _down_from_up(self, x_up: torch.Tensor) -> torch.Tensor:
+        """The activation (or the fused ReLU2 + NVFP4 quantize when the
+        down projection takes a static NVFP4 input), then ``down_proj``, on
+        the up projection's output."""
+        # Weight loading may replace the quantization method after
+        # create_weights(), so do not rely on the cached eligibility alone.
+        if (self._use_fused_relu2_quant
+                and is_static_nvfp4_input_eligible(self.down_proj)):
+            x_act = self._fused_relu2_quant(x_up)
         else:
-            x_up = self.up_proj(x)
-            # Weight loading may replace the quantization method after
-            # create_weights(), so do not rely on the cached eligibility alone.
-            if (self._use_fused_relu2_quant
-                    and is_static_nvfp4_input_eligible(self.down_proj)):
-                x_act = self._fused_relu2_quant(x_up)
-            else:
-                x_act = self.activation(x_up)
-
-        x_down = self.down_proj(x_act)
-
-        return x_down
+            x_act = self.activation(x_up)
+        return self.down_proj(x_act)
 
     def _unquantized_gelu_fusion_eligible(self, x: torch.Tensor) -> bool:
         """Whether the unquantized up projection can use the cuBLASLt GELU

@@ -14,22 +14,34 @@
 # limitations under the License.
 """CPU tests for the token-sharded TP helper (no process group, no GPU): plan invariants, the
 NVFP4 scaling-factor regroup, the FP8 block-scale re-layout and engagement rule, the capability
-gate and the helper's input checks. Ranks are simulated from their plans.
+gate, the helper's input checks, and the gather-mode plumbing (the copy-engine rule, its
+lifecycle against a stand-in state, and the real probe's fallback on a gloo group). Ranks are
+simulated from their plans.
 """
 
+import contextlib
 import itertools
 import math
+import socket
 from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.distributed as dist
 from token_sharded_tp_test_utils import padded_rows, simulated_helper, swizzle_ref, unswizzle_ref
 
-from tensorrt_llm._torch.modules.linear import Linear
+from tensorrt_llm._torch.distributed.ops import AllReduce
+from tensorrt_llm._torch.model_config import ModelConfig
+from tensorrt_llm._torch.modules.linear import Linear, TensorParallelMode
+from tensorrt_llm._torch.modules.mlp import MLP
 from tensorrt_llm._torch.utils import Fp4QuantizedTensor
 from tensorrt_llm._torch.visual_gen.config import DiffusionModelConfig
 from tensorrt_llm._torch.visual_gen.models.modeling import BaseDiffusionModel
 from tensorrt_llm._torch.visual_gen.parallel import token_sharded_tp
+from tensorrt_llm._torch.visual_gen.parallel.token_sharded_modules import (
+    TokenShardedColumn,
+    TokenShardedMLP,
+)
 from tensorrt_llm._torch.visual_gen.parallel.token_sharded_tp import (
     Fp8BlockScaledActivation,
     TokenShardedTP,
@@ -475,3 +487,288 @@ def test_padding_roundtrip(batch, seq, tp, row_align):
     for rank in range(tp):
         p = TokenShardPlan.build(batch, seq, tp, rank, row_align)
         assert torch.equal(simulated_helper(p).shard(x), padded_rows(x, p)[rank_slice(p)])
+
+
+# =============================================================================
+# Gather modes: plumbing, the copy-engine rule, its lifecycle and the probe fallback
+# =============================================================================
+
+_FAKE_GROUP = SimpleNamespace(group_name="fake_tp_group")
+
+
+def _fake_group_tp(monkeypatch, **kwargs):
+    """A real TokenShardedTP on a stand-in 2-rank group (no torch.distributed init); only
+    construction-time behavior (begin() would run a collective)."""
+    monkeypatch.setattr(token_sharded_tp.dist, "get_world_size", lambda group: 2)
+    monkeypatch.setattr(token_sharded_tp.dist, "get_rank", lambda group: 0)
+    return TokenShardedTP(_FAKE_GROUP, **kwargs)
+
+
+class _FakeCeState:
+    """Stand-in for ``token_sharded_ce_gather.CeGatherState`` recording the helper's calls."""
+
+    probe_ok = True
+
+    def __init__(self, group, group_name, *, timeout_ms=600_000):
+        self.group, self.group_name, self.timeout_ms = group, group_name, timeout_ms
+        self.effective, self.reason = False, "not probed"
+        self.ks: set[int] = set()
+        self.calls: list[tuple] = []
+
+    def note_consumer(self, k):
+        self.ks.add(k)
+
+    def prepare(self, plan):  # starts the forward's slot sequence itself (no begin_forward)
+        self.calls.append(("prepare", plan.batch_size, plan.seq_len))
+        self.effective = self.probe_ok
+        self.reason = "" if self.probe_ok else "fake: no symmetric memory on this group"
+
+    def close(self):
+        self.calls.append(("close",))
+
+
+def _fake_ce_module(monkeypatch, probe_ok):
+    """Install a stand-in ``token_sharded_ce_gather`` (registry, state class, validator) and
+    record the helper's warnings. Returns ``(module, warnings, validated consumers)``."""
+    registry, warnings, validated = {}, [], []
+    state_cls = type("FakeCeGatherState", (_FakeCeState,), {"probe_ok": probe_ok})
+
+    def get_state(group_name):
+        return registry[group_name]
+
+    def release_state(group_name):  # as the real one: closes and unregisters
+        registry.pop(group_name).close()
+
+    mod = SimpleNamespace(
+        CeGatherState=state_cls,
+        get_state=get_state,
+        register_state=lambda state: registry.setdefault(state.group_name, state),
+        release_state=release_state,
+        validate_fp8_block_consumer=validated.append,
+        registry=registry,
+    )
+    monkeypatch.setattr(token_sharded_tp, "_ce_gather_module", lambda: mod)
+    monkeypatch.setattr(token_sharded_tp.logger, "warning", lambda *msg: warnings.append(msg[0]))
+    return mod, warnings, validated
+
+
+def _as_tp(linear, mode, reduce_output=False):
+    """Give a TP=1-built Linear the TP metadata it would have at tp_size=2."""
+    linear.tp_size, linear.tp_mode, linear.reduce_output = 2, mode, reduce_output
+    if reduce_output:
+        linear.all_reduce = AllReduce.__new__(AllReduce)
+        torch.nn.Module.__init__(linear.all_reduce)
+    else:
+        linear.all_reduce = None
+    return linear
+
+
+@contextlib.contextmanager
+def _single_rank_gloo_group():
+    """A one-process gloo group: the smallest group the probe can all-reduce its verdict over."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=0, world_size=1)
+    try:
+        yield dist.group.WORLD
+    finally:
+        dist.destroy_process_group()
+
+
+def test_gather_mode_plumbing(monkeypatch):
+    """gather_mode defaults to the module constant (flippable before construction) and is
+    validated; the NCCL mode never touches the copy-engine state."""
+    assert token_sharded_tp.DEFAULT_GATHER_MODE == "nccl"
+    assert token_sharded_tp.GATHER_MODES == ("nccl", "copy_engine")
+    tp = _fake_group_tp(monkeypatch)
+    assert tp.gather_mode == "nccl" and tp.effective_gather_mode == "nccl"
+    tp = _fake_group_tp(monkeypatch, gather_mode="copy_engine")
+    assert tp.gather_mode == "copy_engine"
+    assert tp.effective_gather_mode == "nccl"  # not probed before the first begin()
+    with pytest.raises(ValueError, match="gather_mode must be one of"):
+        _fake_group_tp(monkeypatch, gather_mode="rdma")
+    monkeypatch.setattr(token_sharded_tp, "DEFAULT_GATHER_MODE", "copy_engine")
+    assert _fake_group_tp(monkeypatch).gather_mode == "copy_engine"
+    assert _fake_group_tp(monkeypatch, gather_mode="nccl").gather_mode == "nccl"
+    mod, warnings, _ = _fake_ce_module(monkeypatch, probe_ok=True)
+    tp = _fake_group_tp(monkeypatch, gather_mode="nccl")
+    tp.note_consumer(_fp8_block_linear())
+    tp.close()
+    assert tp._ce_consumers == [] and tp._ce_state is None and mod.registry == {}
+    assert warnings == []
+
+
+def test_from_model_config_reads_optional_gather_attribute(monkeypatch):
+    """``parallel.token_sharded_gather`` selects the mode when the parallel config has it
+    (a future field); today's ParallelConfig has none and the module default applies."""
+    monkeypatch.setattr(token_sharded_tp.dist, "get_world_size", lambda group: 2)
+    monkeypatch.setattr(token_sharded_tp.dist, "get_rank", lambda group: 0)
+    vgm = SimpleNamespace(tp_group_pg=_FAKE_GROUP, tp_rank=0)
+    parallel = ParallelConfig(tp_size=2, tp_layout="token_sharded")
+    assert not hasattr(parallel, "token_sharded_gather")  # no public knob yet
+    cfg = SimpleNamespace(visual_gen_mapping=vgm, parallel=parallel)
+    assert TokenShardedTP.from_model_config(cfg).gather_mode == "nccl"
+    cfg.parallel = SimpleNamespace(token_sharded_gather="copy_engine")
+    assert TokenShardedTP.from_model_config(cfg).gather_mode == "copy_engine"
+    cfg.parallel = SimpleNamespace(token_sharded_gather=None)
+    assert TokenShardedTP.from_model_config(cfg).gather_mode == "nccl"
+    monkeypatch.setattr(token_sharded_tp, "DEFAULT_GATHER_MODE", "copy_engine")
+    assert TokenShardedTP.from_model_config(cfg).gather_mode == "copy_engine"
+    cfg.parallel = SimpleNamespace(token_sharded_gather="bogus")
+    with pytest.raises(ValueError, match="gather_mode must be one of"):
+        TokenShardedTP.from_model_config(cfg)
+
+
+def test_uses_ce_gather_rule(monkeypatch):
+    """The fused path takes an FP8 block-scale consumer's bf16 or FP8 input, with no active
+    LoRA, once the probe accepted the mode; everything else stays on gather_input."""
+    monkeypatch.setattr(token_sharded_tp, "is_sm_100f", lambda: True)
+    fp8, bf16 = _fp8_block_linear(), Linear(256, 128, bias=False, dtype=torch.bfloat16)
+    ts = simulated_helper(TokenShardPlan.build(2, 8, 2, 0), gather_mode="copy_engine")
+    x = torch.zeros(8, 256, dtype=torch.bfloat16)
+    pair = Fp8BlockScaledActivation(
+        torch.zeros(8, 256, dtype=torch.float8_e4m3fn), torch.zeros(8, 1, dtype=torch.int32)
+    )
+    assert not ts.uses_ce_gather(fp8, x)  # no state yet (begin() has not probed)
+    ts._ce_state = SimpleNamespace(effective=False, reason="probe failed")
+    assert ts.effective_gather_mode == "nccl" and not ts.uses_ce_gather(fp8, x)
+    ts._ce_state = SimpleNamespace(effective=True, reason="")
+    assert ts.effective_gather_mode == "copy_engine"
+    assert ts.uses_ce_gather(fp8, x) and ts.uses_ce_gather(fp8, pair)
+    assert ts.uses_ce_gather(fp8, x.view(1, 8, 256))  # [n, g, K] sample groups
+    assert ts.uses_ce_gather(fp8, x, lora_params=None) and ts.uses_ce_gather(fp8, x, {})
+    assert not ts.uses_ce_gather(fp8, x, lora_params={"adapter": 1})  # active LoRA
+    assert not ts.uses_ce_gather(bf16, x)  # not an FP8 block-scale consumer
+    assert not ts.uses_ce_gather(None, x)
+    assert not ts.uses_ce_gather(_fp8_block_linear(disable_deep_gemm=True), x)
+    assert not ts.uses_ce_gather(fp8, x.float())  # not bf16
+    fp4 = Fp4QuantizedTensor(
+        torch.zeros(8, 128, dtype=torch.uint8), torch.zeros(swizzled_sf_numel(8, 16))
+    )
+    assert not ts.uses_ce_gather(fp8, fp4)
+    monkeypatch.setattr(token_sharded_tp, "is_sm_100f", lambda: False)
+    assert not ts.uses_ce_gather(fp8, x)  # the FP8 rule itself needs the SM100 family
+    monkeypatch.setattr(token_sharded_tp, "is_sm_100f", lambda: True)
+    # The NCCL mode never engages, whatever a state says.
+    nccl = simulated_helper(TokenShardPlan.build(2, 8, 2, 0))
+    nccl._ce_state = SimpleNamespace(effective=True, reason="")
+    assert nccl.effective_gather_mode == "nccl" and not nccl.uses_ce_gather(fp8, x)
+
+
+def test_copy_engine_lifecycle_probe_fallback(monkeypatch):
+    """A failed probe keeps the NCCL gather (the state warns, the helper stays quiet); the
+    group's state is shared by its helpers, sized by every noted consumer whose K the fused
+    op can take, and released by the first close()."""
+    mod, warnings, validated = _fake_ce_module(monkeypatch, probe_ok=False)
+    plan = TokenShardPlan.build(2, 8, 2, 0)
+    ts = simulated_helper(plan, gather_mode="copy_engine")
+    consumer = _fp8_block_linear()
+    ts.note_consumer(consumer)  # at conversion, before any state exists
+    ts.note_consumer(Linear(192, 128, bias=False, dtype=torch.bfloat16))  # K % 128 != 0
+    assert ts._ce_state is None and mod.registry == {}
+    ts.begin(2, 8)
+    state = mod.registry["simulated"]
+    assert ts._ce_state is state and state.ks == {256}
+    assert state.calls == [("prepare", 2, 8)]
+    assert ts.effective_gather_mode == "nccl"
+    assert not ts.uses_ce_gather(consumer, torch.zeros(8, 256, dtype=torch.bfloat16))
+    assert validated == [] and warnings == []  # nothing to validate or say: the state warned
+    ts.begin(2, 8)  # the next forward
+    assert state.calls[1:] == [("prepare", 2, 8)]
+    # A second helper of the same group (Wan2.2's second transformer) shares the state.
+    other = simulated_helper(plan, gather_mode="copy_engine")
+    other.note_consumer(_fp8_block_linear(k=512))
+    other.begin(2, 8)
+    assert other._ce_state is state and state.ks == {256, 512}
+    other.note_consumer(_fp8_block_linear(k=640))  # noted after the state exists
+    assert state.ks == {256, 512, 640}
+    # close(): the first releases the group's state, the rest are no-ops, repeats are harmless.
+    ts.close()
+    assert mod.registry == {} and state.calls[-1] == ("close",) and ts._ce_state is None
+    other.close()
+    ts.close()
+    assert state.calls.count(("close",)) == 1
+
+
+def test_copy_engine_lifecycle_effective(monkeypatch):
+    """An accepted probe validates the FP8 consumers once (not the others) and engages the
+    rule; a rejected operand surfaces at begin()."""
+    mod, warnings, validated = _fake_ce_module(monkeypatch, probe_ok=True)
+    monkeypatch.setattr(token_sharded_tp, "is_sm_100f", lambda: True)
+    plan = TokenShardPlan.build(2, 8, 2, 0)
+    ts = simulated_helper(plan, gather_mode="copy_engine")
+    fp8, bf16 = _fp8_block_linear(), Linear(256, 128, bias=False, dtype=torch.bfloat16)
+    ts.note_consumer(fp8)
+    ts.note_consumer(bf16)
+    ts.begin(2, 8)
+    assert ts.effective_gather_mode == "copy_engine" and warnings == []
+    assert validated == [fp8]
+    ts.begin(2, 8)
+    assert validated == [fp8]  # once
+    x = torch.zeros(8, 256, dtype=torch.bfloat16)
+    assert ts.uses_ce_gather(fp8, x) and not ts.uses_ce_gather(bf16, x)
+    ts.close()
+    assert mod.registry == {}
+
+    mod, _, _ = _fake_ce_module(monkeypatch, probe_ok=True)
+
+    def reject(linear):
+        raise ValueError("weight_scale is not the UE8M0 layout")
+
+    mod.validate_fp8_block_consumer = reject
+    ts = simulated_helper(plan, gather_mode="copy_engine")
+    ts.note_consumer(_fp8_block_linear())
+    with pytest.raises(ValueError, match="UE8M0"):
+        ts.begin(2, 8)
+    assert ts._ce_validated is False
+
+
+def test_adapters_note_their_consumers():
+    """prepare() hands the column projections to the helper (their K sizes the pool); the
+    NCCL mode keeps the helper free of them."""
+    plan = TokenShardPlan.build(2, 8, 2, 0)
+    ts = simulated_helper(plan, gather_mode="copy_engine")
+    col = _as_tp(_fp8_block_linear(), TensorParallelMode.COLUMN)
+    TokenShardedColumn.prepare(col, ts, "blocks.0.attn1.qkv_proj")
+    mlp = MLP(
+        hidden_size=256,
+        intermediate_size=512,
+        bias=True,
+        dtype=torch.bfloat16,
+        config=ModelConfig(quant_config=QuantConfig(quant_algo=QuantAlgo.FP8_BLOCK_SCALES)),
+    )
+    _as_tp(mlp.up_proj, TensorParallelMode.COLUMN)
+    _as_tp(mlp.down_proj, TensorParallelMode.ROW, reduce_output=True)
+    TokenShardedMLP.prepare(mlp, ts, "blocks.0.ffn")
+    assert ts._ce_consumers == [col, mlp.up_proj]
+    nccl = simulated_helper(plan)
+    TokenShardedColumn.prepare(col, nccl, "blocks.0.attn1.qkv_proj")
+    assert nccl._ce_consumers == []
+
+
+def test_copy_engine_probe_falls_back_on_gloo(monkeypatch):
+    """The real probe on a CPU gloo group: no symmetric memory, so the NCCL gather is kept
+    with one warning naming the reason (over repeated forwards and a second helper of the
+    group), and close() releases the group's state."""
+    warnings = []
+    monkeypatch.setattr(token_sharded_tp.logger, "warning", lambda *msg: warnings.append(msg[0]))
+    with _single_rank_gloo_group() as group:
+        plan = TokenShardPlan.build(2, 8, 2, 0)
+        ts = simulated_helper(plan, gather_mode="copy_engine")
+        ts.group, ts.group_name = group, group.group_name
+        ts.note_consumer(_fp8_block_linear())
+        ts.begin(2, 8)
+        assert ts.effective_gather_mode == "nccl"
+        reason = ts._ce_state.reason
+        assert reason and len(warnings) == 1 and reason in warnings[0]
+        assert "keeping the NCCL all-gather" in warnings[0]
+        ts.begin(2, 8)
+        other = simulated_helper(plan, gather_mode="copy_engine")
+        other.group, other.group_name = group, group.group_name
+        other.begin(2, 8)
+        assert other._ce_state is ts._ce_state and len(warnings) == 1
+        ts.close()
+        other.close()
+        ceg = token_sharded_tp._ce_gather_module()
+        assert token_sharded_tp._registered_ce_state(ceg, group.group_name) is None

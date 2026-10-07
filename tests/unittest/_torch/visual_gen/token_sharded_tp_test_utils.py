@@ -57,19 +57,22 @@ def unswizzle_ref(buf: torch.Tensor, rows: int, sf_cols: int) -> torch.Tensor:
     return buf.reshape(-1)[sf_offsets(rows, sf_cols, buf.device)].view(rows, sf_cols)
 
 
-def simulated_helper(plan: TokenShardPlan) -> TokenShardedTP:
+def simulated_helper(plan: TokenShardPlan, gather_mode: str = "nccl") -> TokenShardedTP:
     """A TokenShardedTP for one simulated rank's plan, without a process group.
 
     Only calls that run no collective work: ``begin`` for the plan's own shape, shard,
     local_view, per_sample_table, pad_row_input, the padding helpers and the collectives'
-    shape checks.
+    shape checks. ``gather_mode="copy_engine"`` starts with no gather state (the CPU tests
+    install a fake one or a gloo group before ``begin``).
     """
     ts = TokenShardedTP.__new__(TokenShardedTP)
     ts.group, ts.group_name = None, "simulated"
     ts.tp_size, ts.tp_rank = plan.tp_size, plan.tp_rank
     ts.row_align = plan.row_align
+    ts.gather_mode = gather_mode
     ts._plans = {(plan.batch_size, plan.seq_len): plan}
     ts._plan = plan
+    ts._ce_state, ts._ce_consumers, ts._ce_validated = None, [], False
     return ts
 
 

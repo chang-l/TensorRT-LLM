@@ -35,11 +35,21 @@ the end of ``__init__``, which replaces its ``self.sharder`` with a
 Its forward routes the residual stream through ``sharder.shard`` / ``gather``, per-token tables
 through ``shard(..., expected_seq_len=S)`` and per-sample tables through ``shard_per_sample``,
 while ``shard_rope`` leaves RoPE whole. Code between projections must be row-local.
+
+Gather modes (``gather_mode``, internal; :data:`DEFAULT_GATHER_MODE` is ``"nccl"``): ``"nccl"``
+all-gathers a column projection's input with NCCL and runs the GEMM on the gathered rows;
+``"copy_engine"`` moves an FP8 block-scale input with copy engines through the TP group's
+symmetric-memory pool and runs the consumer's GEMM per source as each rank's rows arrive
+(``token_sharded_ce_gather``, the fused op ``trtllm::token_sharded_fp8_ce_gather_gemm``). The
+copy-engine mode is probed once, rank-agreed, at the first :meth:`TokenShardedTP.begin`; where
+it is unavailable the helper keeps the NCCL gather and warns once. Its result is bitwise the
+NCCL path's (same quantized bytes, same DeepGEMM kernel per row block, bias added once).
 """
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
+from types import ModuleType
+from typing import TYPE_CHECKING, Literal, NamedTuple, get_args
 
 import torch
 import torch.distributed as dist
@@ -58,13 +68,18 @@ from ..utils import SequenceSharder
 
 if TYPE_CHECKING:
     from ..config import DiffusionModelConfig
+    from .token_sharded_ce_gather import CeGatherState
 
 __all__ = [
+    "DEFAULT_GATHER_MODE",
     "FP8_BLOCK_SIZE",
+    "GATHER_MODES",
     "Fp8BlockScaledActivation",
+    "GatherMode",
     "TokenShardPlan",
     "TokenShardedSequenceSharder",
     "TokenShardedTP",
+    "drop_padding",
     "fp8_block_scale_prequant_ok",
     "fp8_scale_cols",
     "fp8_scales_mn_major",
@@ -76,6 +91,16 @@ __all__ = [
 ]
 
 FP8_BLOCK_SIZE = 128
+
+GatherMode = Literal["nccl", "copy_engine"]
+"""The column-projection input gathers a :class:`TokenShardedTP` can run."""
+
+GATHER_MODES: tuple[GatherMode, ...] = get_args(GatherMode)
+"""The values of :data:`GatherMode`, for validation and messages."""
+
+DEFAULT_GATHER_MODE: GatherMode = "nccl"
+"""The gather mode a :class:`TokenShardedTP` built without an explicit ``gather_mode`` uses
+(read at construction, so a process may flip it before the model is built)."""
 
 
 class Fp8BlockScaledActivation(NamedTuple):
@@ -338,6 +363,70 @@ def fp8_scales_mn_major(rows: torch.Tensor) -> torch.Tensor:
 
 
 # =============================================================================
+# Padding
+# =============================================================================
+
+
+def drop_padding(
+    t2d: torch.Tensor, batch_size: int, seq_len: int, padded_seq_len: int
+) -> torch.Tensor:
+    """The padded token stream ``[B * S_pad, N]`` -> the real rows ``[B * S, N]``.
+
+    Python ints only (the plan's), so it traces and captures with no data-dependent shape:
+    the input is returned as is for an unpadded plan, as a contiguous prefix view for
+    ``B == 1``, else the per-sample pad rows are dropped with one copy. The caller guarantees
+    the row count (the plan's collectives and the fused gather op build it).
+
+    Args:
+        t2d: ``[B * S_pad, N]``.
+        batch_size: ``B``.
+        seq_len: ``S``, real tokens per sample.
+        padded_seq_len: ``S_pad``.
+    """
+    if padded_seq_len == seq_len:
+        return t2d
+    if batch_size == 1:
+        return t2d[:seq_len]  # contiguous prefix view
+    return t2d.view(batch_size, padded_seq_len, -1)[:, :seq_len].reshape(batch_size * seq_len, -1)
+
+
+# =============================================================================
+# Copy-engine gather seam
+# =============================================================================
+
+
+def _ce_gather_module() -> ModuleType:
+    """``token_sharded_ce_gather``, imported on first use (it imports this module)."""
+    from . import token_sharded_ce_gather
+
+    return token_sharded_ce_gather
+
+
+def _registered_ce_state(mod: ModuleType, group_name: str) -> "CeGatherState | None":
+    """The registry's state for ``group_name``, or None."""
+    try:
+        return mod.get_state(group_name)
+    except KeyError:
+        return None
+
+
+def _ce_consumer_k(consumer: nn.Module) -> int | None:
+    """``consumer``'s ``K`` for sizing the copy-engine pool, or None when the fused op can
+    never take it (``K`` not a multiple of the FP8 block)."""
+    k = int(consumer.in_features)
+    return k if k > 0 and k % FP8_BLOCK_SIZE == 0 else None
+
+
+def _check_gather_mode(gather_mode: GatherMode | None) -> GatherMode:
+    mode = DEFAULT_GATHER_MODE if gather_mode is None else gather_mode
+    if mode not in GATHER_MODES:
+        raise ValueError(
+            f"TokenShardedTP: gather_mode must be one of {GATHER_MODES}; got {mode!r}."
+        )
+    return mode
+
+
+# =============================================================================
 # Collectives
 # =============================================================================
 
@@ -375,6 +464,11 @@ class TokenShardedTP:
         tp_rank: Expected rank of this process in ``group``; a mismatch raises.
         row_align: Row alignment of every plan (see :meth:`TokenShardPlan.build`); the
             default 1 pads only what the rank count requires.
+        gather_mode: ``"nccl"`` or ``"copy_engine"`` (see the module docstring); None
+            selects :data:`DEFAULT_GATHER_MODE` at construction. The copy-engine mode
+            engages only for consumers that take a pre-quantized FP8 block-scale input
+            (:meth:`uses_ce_gather`); it is probed at the first :meth:`begin` and falls back
+            to ``"nccl"`` with one warning where unavailable (:attr:`effective_gather_mode`).
     """
 
     def __init__(
@@ -383,7 +477,9 @@ class TokenShardedTP:
         *,
         tp_rank: int | None = None,
         row_align: int = 1,
+        gather_mode: GatherMode | None = None,
     ) -> None:
+        self.gather_mode: GatherMode = _check_gather_mode(gather_mode)
         if group is None:
             raise ValueError(
                 "TokenShardedTP needs a torch.distributed TP process group; got None "
@@ -412,17 +508,29 @@ class TokenShardedTP:
         self.group_name: str = group.group_name
         self._plans: dict[tuple[int, int], TokenShardPlan] = {}
         self._plan: TokenShardPlan | None = None
+        # Copy-engine gather: the group's state (token_sharded_ce_gather.CeGatherState, shared
+        # by every TokenShardedTP of the group through the registry) is created at first use
+        # and released by close(); the consumers the adapters noted size its pool and are
+        # validated once at the first effective begin().
+        self._ce_state: "CeGatherState | None" = None
+        self._ce_consumers: list[nn.Module] = []
+        self._ce_validated: bool = False
 
     @classmethod
     def from_model_config(cls, model_config: "DiffusionModelConfig") -> "TokenShardedTP":
-        """The helper for the TP group of ``model_config.visual_gen_mapping``."""
+        """The helper for the TP group of ``model_config.visual_gen_mapping``.
+
+        The gather mode is ``model_config.parallel.token_sharded_gather`` when the parallel
+        config carries that attribute (and it is not None), else :data:`DEFAULT_GATHER_MODE`.
+        """
         vgm = model_config.visual_gen_mapping
         if vgm is None:
             raise ValueError(
                 "TokenShardedTP: tp_layout='token_sharded' needs a VisualGenMapping "
                 "(model_config.visual_gen_mapping is None)."
             )
-        return cls(vgm.tp_group_pg, tp_rank=vgm.tp_rank)
+        gather_mode = getattr(model_config.parallel, "token_sharded_gather", None)
+        return cls(vgm.tp_group_pg, tp_rank=vgm.tp_rank, gather_mode=gather_mode)
 
     # --- plan -----------------------------------------------------------------------
 
@@ -432,7 +540,10 @@ class TokenShardedTP:
         Call eagerly, and for a new shape before any CUDA-graph capture: the first use of a
         shape checks with an ``all_gather_object`` that all TP ranks run that shape (a mismatch
         would hang or corrupt the collectives). Later uses skip the check, so a rank that reuses
-        a cached shape while a peer starts a new one is not detected.
+        a cached shape while a peer starts a new one is not detected. In the copy-engine gather
+        mode this also probes the mode once (rank-agreed), sizes the group's symmetric pool for
+        the plan (grow-only; a new size under capture raises) and starts the forward's slot
+        sequence.
         """
         key = (batch_size, seq_len)
         plan = self._plans.get(key)
@@ -453,6 +564,8 @@ class TokenShardedTP:
                 )
             self._plans[key] = plan
         self._plan = plan
+        if self.gather_mode == "copy_engine":
+            self._ce_begin(plan)
         return plan
 
     def _check_rank_agreement(self, batch_size: int, seq_len: int) -> None:
@@ -652,15 +765,9 @@ class TokenShardedTP:
         return torch.cat([t[b : b + 1] for b in eb])
 
     def _drop_padding(self, t2d: torch.Tensor) -> torch.Tensor:
-        # [B * S_pad, K] -> [B * S, K]
+        # [B * S_pad, K] -> [B * S, K] (drop_padding with the current plan)
         p = self.plan
-        if not p.is_padded:
-            return t2d
-        if p.batch_size == 1:
-            return t2d[: p.seq_len]  # contiguous prefix view
-        return t2d.view(p.batch_size, p.padded_seq_len, -1)[:, : p.seq_len].reshape(
-            p.num_tokens, -1
-        )
+        return drop_padding(t2d, p.batch_size, p.seq_len, p.padded_seq_len)
 
     def _add_padding(self, t: torch.Tensor) -> torch.Tensor:
         # [B * S, K] or [B, S, K] -> [B * S_pad, K]
@@ -750,23 +857,151 @@ class TokenShardedTP:
             )
         return payload, a.scaling_factor.reshape(-1), k
 
-    def _check_fp8(self, a: Fp8BlockScaledActivation) -> tuple[torch.Tensor, torch.Tensor]:
+    def _check_fp8(
+        self, a: Fp8BlockScaledActivation, op: str = "all_gather"
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         m = self.plan.local_rows
         fp8, scale = a
         if fp8.dtype != torch.float8_e4m3fn or fp8.dim() != 2 or fp8.shape[0] != m:
             raise ValueError(
-                f"TokenShardedTP.all_gather: FP8 block-scale payload must be float8_e4m3fn "
+                f"TokenShardedTP.{op}: FP8 block-scale payload must be float8_e4m3fn "
                 f"[{m}, K] for the current plan ({self._plan_desc()}); got {fp8.dtype} "
                 f"{tuple(fp8.shape)}."
             )
         cols = fp8_scale_cols(fp8.shape[1])
         if scale.dtype != torch.int32 or tuple(scale.shape) != (m, cols):
             raise ValueError(
-                f"TokenShardedTP.all_gather: FP8 block scales must be packed UE8M0 int32 "
+                f"TokenShardedTP.{op}: FP8 block scales must be packed UE8M0 int32 "
                 f"[{m}, {cols}] for a [{m}, {fp8.shape[1]}] payload; got {scale.dtype} "
                 f"{tuple(scale.shape)}."
             )
         return fp8, scale
+
+    # --- copy-engine gather -----------------------------------------------------------
+
+    def note_consumer(self, consumer: nn.Module) -> None:
+        """Record a column projection converted for this TP (the adapters' ``prepare()``).
+
+        In the copy-engine mode its ``in_features`` (``K``) sizes the group's symmetric pool
+        and its FP8 operands are validated once at the first effective :meth:`begin` (the
+        weights are final only after loading, so not here). A no-op in the NCCL mode.
+        """
+        if self.gather_mode != "copy_engine":
+            return
+        self._ce_consumers.append(consumer)
+        if self._ce_state is not None and _ce_consumer_k(consumer) is not None:
+            self._ce_state.note_consumer(_ce_consumer_k(consumer))
+
+    @property
+    def effective_gather_mode(self) -> GatherMode:
+        """``"copy_engine"`` once the probe at the first :meth:`begin` accepted it, else
+        ``"nccl"`` (the configured mode is :attr:`gather_mode`)."""
+        state = self._ce_state
+        if self.gather_mode == "copy_engine" and state is not None and state.effective:
+            return "copy_engine"
+        return "nccl"
+
+    def uses_ce_gather(
+        self, consumer: nn.Module | None, act: Activation, lora_params: object = None
+    ) -> bool:
+        """Whether a column projection's call runs the fused copy-engine gather + GEMM.
+
+        True iff the effective mode is ``"copy_engine"``, ``consumer`` takes a pre-quantized
+        FP8 block-scale input (:func:`fp8_block_scale_prequant_ok`), no LoRA is active
+        (``lora_params`` falsy; an active LoRA needs the dense input) and ``act`` is bf16 or
+        already an :class:`Fp8BlockScaledActivation`. Anything else (NVFP4, bf16 consumers)
+        takes :meth:`gather_input` as in the NCCL mode. Decided per call: the quant method
+        is final only after loading.
+        """
+        if self.effective_gather_mode != "copy_engine" or lora_params:
+            return False
+        if not fp8_block_scale_prequant_ok(consumer):
+            return False
+        if isinstance(act, Fp8BlockScaledActivation):
+            return True
+        return isinstance(act, torch.Tensor) and act.dtype == torch.bfloat16
+
+    def ce_gather_gemm(
+        self, consumer: Linear, act: torch.Tensor | Fp8BlockScaledActivation
+    ) -> torch.Tensor:
+        """``consumer`` applied to all ``B * S`` real rows, gathered with copy engines.
+
+        ``act`` is this rank's ``[n, g, K]`` / ``[m, K]`` bf16 rows (quantized here with
+        :func:`quantize_fp8_block`) or :class:`Fp8BlockScaledActivation`. Returns the
+        ``[B * S, N_local]`` bf16 output ``Linear.forward`` gives on the gathered input: the
+        fused op ``trtllm::token_sharded_fp8_ce_gather_gemm`` (one GEMM per source rank into
+        its row block, pad rows dropped) plus ``consumer.bias`` added once, outside the op,
+        so it traces and fuses as in the NCCL mode. Call only when :meth:`uses_ce_gather`.
+        """
+        p = self.plan
+        if isinstance(act, Fp8BlockScaledActivation):
+            loc = Fp8BlockScaledActivation(act.fp8.reshape(-1, act.fp8.shape[-1]), act.scale)
+        else:
+            loc = quantize_fp8_block(act)
+        fp8, scale = self._check_fp8(loc, "ce_gather_gemm")
+        out = torch.ops.trtllm.token_sharded_fp8_ce_gather_gemm(
+            fp8,
+            scale,
+            consumer.weight,
+            consumer.weight_scale,
+            self.group_name,
+            p.tp_rank,
+            p.tp_size,
+            p.batch_size,
+            p.seq_len,
+            p.padded_seq_len,
+        )
+        if consumer.bias is not None:
+            out = out + consumer.bias
+        return out
+
+    def close(self) -> None:
+        """Release the group's copy-engine gather state (its symmetric pool and side stream).
+
+        Call before the process group is destroyed (``BasePipeline.cleanup`` does, through the
+        model's sharder). Idempotent; a no-op in the NCCL mode. The state is shared by every
+        TokenShardedTP of the group: the first close releases it for all of them.
+        """
+        state, self._ce_state = self._ce_state, None
+        if state is None:
+            return
+        mod = _ce_gather_module()
+        if _registered_ce_state(mod, self.group_name) is state:
+            mod.release_state(self.group_name)  # closes the state and unregisters it
+
+    def _ensure_ce_state(self) -> "CeGatherState":
+        if self._ce_state is None:
+            mod = _ce_gather_module()
+            state = _registered_ce_state(mod, self.group_name)
+            if state is None:
+                state = mod.register_state(mod.CeGatherState(self.group, self.group_name))
+            for consumer in self._ce_consumers:
+                k = _ce_consumer_k(consumer)
+                if k is not None:
+                    state.note_consumer(k)
+            self._ce_state = state
+        return self._ce_state
+
+    def _ce_begin(self, plan: TokenShardPlan) -> None:
+        # Eager, every rank, same order: the state probes the mode once (rank-agreed; on
+        # failure it warns once and stays off, so the NCCL path below is kept), starts the
+        # forward's slot sequence and sizes the pool for the plan (grow-only; raises if it
+        # must allocate under capture or after a CUDA graph captured it).
+        state = self._ensure_ce_state()
+        state.prepare(plan)
+        if state.effective:
+            self._validate_ce_consumers()
+
+    def _validate_ce_consumers(self) -> None:
+        # Once, after the weights are loaded: every consumer the fused op will run must carry
+        # the operands the per-chunk GEMM expects (nothing is re-checked per chunk).
+        if self._ce_validated:
+            return
+        validate = _ce_gather_module().validate_fp8_block_consumer
+        for consumer in self._ce_consumers:
+            if fp8_block_scale_prequant_ok(consumer):
+                validate(consumer)
+        self._ce_validated = True
 
 
 # =============================================================================
@@ -818,6 +1053,17 @@ class TokenShardedSequenceSharder(SequenceSharder):
 
     def shard_per_sample(self, table: torch.Tensor | None) -> torch.Tensor | None:
         return None if table is None else self._tp.per_sample_table(table)
+
+    @property
+    def needs_eager_warmup(self) -> bool:
+        """Whether the pipeline must run every warm-up shape eagerly before it captures CUDA
+        graphs: the copy-engine gather's symmetric pool is sized by the forwards, grow-only,
+        and cannot move once a graph holds its buffers."""
+        return self._tp.gather_mode == "copy_engine"
+
+    def close(self) -> None:
+        """Release the TP helper's copy-engine gather state (:meth:`TokenShardedTP.close`)."""
+        self._tp.close()
 
     def gather(
         self, tensor: torch.Tensor, dim: int = 1, *, unpad_to: int | None = None
