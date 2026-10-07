@@ -36,6 +36,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from tensorrt_llm._torch.modules.linear import Linear, TensorParallelMode
 from tensorrt_llm._torch.utils import Fp4QuantizedTensor, gelu_tanh
@@ -48,6 +49,8 @@ from tensorrt_llm._torch.visual_gen.parallel.token_sharded_modules import (
 from tensorrt_llm._torch.visual_gen.parallel.token_sharded_tp import (
     TokenShardedSequenceSharder,
     TokenShardedTP,
+    _all_gather_rows,
+    _all_gather_rows_coalesced,
     quantize_nvfp4,
     swizzled_sf_numel,
 )
@@ -225,6 +228,124 @@ def _logic_all_gather(rank, world_size, device):
 
 
 # =============================================================================
+# The coalesced boundary gather: one collective, bitwise equal to separate gathers
+# =============================================================================
+
+
+class _CollectiveSpy(TorchDispatchMode):
+    """Records the functional-collective ops dispatched under it (eager only), by name.
+
+    One ``all_gather_into_tensor_coalesced`` dispatch is one
+    ``ProcessGroup::allgather_into_tensor_coalesced`` call (one NCCL group); how the backend
+    realizes it is below this level. ``wait_tensor`` and funcol's private wrapper ops
+    (``_wrap_tensor_autograd``) share the namespace but move no data.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.dispatches = []
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        namespace, name = func._schema.name.split("::")
+        if namespace == "_c10d_functional" and name != "wait_tensor" and not name.startswith("_"):
+            self.dispatches.append(name)
+        return func(*args, **(kwargs or {}))
+
+
+def _graph_collectives(fn, *args):
+    """Compile ``fn`` (``fullgraph=True``, so a graph break raises) with a recording backend
+    and return the data-moving ``_c10d_functional`` ops of the Dynamo graph, in order, plus
+    the outputs. The spy cannot see a compiled graph; this is what Inductor receives."""
+    import torch._dynamo
+
+    ops = []
+
+    def record(gm, example_inputs):
+        for n in gm.graph.nodes:
+            name = str(n.target).removesuffix(".default")
+            if n.op == "call_function" and name.startswith("_c10d_functional."):
+                if not name.endswith("wait_tensor"):
+                    ops.append(name.split(".", 1)[1])
+        return gm.forward
+
+    torch._dynamo.reset()
+    out = torch.compile(fn, backend=record, fullgraph=True)(*args)
+    return ops, out
+
+
+def _logic_coalesced_gather(rank, world_size, device):
+    """``_all_gather_rows_coalesced`` is one collective dispatch, returns plain (waited)
+    tensors and is bitwise equal to one ``_all_gather_rows`` per tensor: same-dtype buffers
+    (the NVFP4 payload + SF, 2-D and 1-D, ``m`` a multiple of 128 and not), mixed dtypes (a
+    later FP8 payload + scales, one ``[m, 1]`` whose last stride is not 1) and a
+    non-contiguous input. An NVFP4 ``all_gather`` issues exactly one collective; a bf16 one
+    stays one."""
+    tp = _helper()
+    name = tp.group_name
+    gen = torch.Generator().manual_seed(11 + rank)  # rank-distinct data: a wrong rank order shows
+    for m, k in ((7, 64), (150, 80), (256, 128)):
+        payload = torch.randint(0, 256, (m, k // 2), dtype=torch.uint8, generator=gen)
+        sf = torch.randint(
+            0, 256, (swizzled_sf_numel(m, k // 16),), dtype=torch.uint8, generator=gen
+        )
+        scales = torch.randint(-1000, 1000, (m, 3), dtype=torch.int32, generator=gen)
+        rows = torch.randn(m, 8, generator=gen).to(torch.bfloat16)
+        payload, sf, scales, rows = (t.to(device) for t in (payload, sf, scales, rows))
+        # [m, 1] with strides (1, m): is_contiguous(), yet a byte view of it needs flattening.
+        column = torch.randint(-9, 9, (1, m), dtype=torch.int32, generator=gen).to(device).t()
+        for xs in ([payload, sf], [payload, scales, column, rows], [payload.t()[:5]]):
+            ref = [_all_gather_rows(x, name) for x in xs]
+            with _CollectiveSpy() as spy:
+                got = _all_gather_rows_coalesced(xs, name)
+            ok = (
+                spy.dispatches == ["all_gather_into_tensor_coalesced"]
+                and len(got) == len(ref)
+                and all(type(g) is torch.Tensor for g in got)  # waited, not AsyncCollectiveTensor
+                and all(g.dtype == r.dtype and torch.equal(g, r) for g, r in zip(got, ref))
+            )
+            dtypes = [x.dtype for x in xs]
+            _check(ok, f"coalesced gather m={m} {dtypes}: dispatches {spy.dispatches}", device)
+    for b, s in _SHAPES:
+        m = tp.begin(b, s).local_rows
+        fp4 = Fp4QuantizedTensor(
+            torch.randint(0, 256, (m, 32), dtype=torch.uint8, generator=gen).to(device),
+            torch.randint(0, 256, (swizzled_sf_numel(m, 4),), dtype=torch.uint8, generator=gen).to(
+                device
+            ),
+        )
+        with _CollectiveSpy() as spy:
+            tp.all_gather(fp4)
+        _check(
+            spy.dispatches == ["all_gather_into_tensor_coalesced"],
+            f"NVFP4 all_gather {(b, s)}: dispatches {spy.dispatches}",
+            device,
+        )
+        with _CollectiveSpy() as spy:
+            tp.all_gather(torch.zeros(m, 4, device=device))
+        _check(
+            spy.dispatches == ["all_gather_into_tensor"],
+            f"plain all_gather {(b, s)}: dispatches {spy.dispatches}",
+            device,
+        )
+    # Under torch.compile (the production path) the graph carries the coalesced op itself:
+    # no decomposition into per-tensor gathers and no graph break. Uses the last plan and
+    # buffers of the loop above.
+    b, s = _SHAPES[-1]
+    ref = tp.all_gather(fp4)
+    ops, got = _graph_collectives(
+        lambda payload, sf: tp.all_gather(Fp4QuantizedTensor(payload, sf)),
+        fp4.fp4_tensor,
+        fp4.scaling_factor,
+    )
+    ok = (
+        ops == ["all_gather_into_tensor_coalesced"]
+        and torch.equal(got.fp4_tensor, ref.fp4_tensor)
+        and torch.equal(got.scaling_factor, ref.scaling_factor)
+    )
+    _check(ok, f"compiled NVFP4 all_gather {(b, s)}: graph collectives {ops}", device)
+
+
+# =============================================================================
 # Rank disagreement on the token layout raises on every rank (no hang)
 # =============================================================================
 
@@ -252,13 +373,19 @@ def _logic_fp4_quantize_gather(rank, world_size, device):
             gen = torch.Generator().manual_seed(b * 10 + s + k)
             x = (torch.randn(b, s, k, generator=gen) * 3).to(device, torch.bfloat16)
             scale = (448.0 * 6.0 / x.float().abs().amax()).reshape(1)
-            got = tp.all_gather(quantize_nvfp4(tp.shard(x), scale))
+            loc = quantize_nvfp4(tp.shard(x), scale)
+            with _CollectiveSpy() as spy:
+                got = tp.all_gather(loc)
             ref_fp4, ref_sf = torch.ops.trtllm.fp4_quantize(x.reshape(b * s, k), scale, 16, False)
-            ok = torch.equal(got.fp4_tensor, ref_fp4) and torch.equal(
-                unswizzle_ref(got.scaling_factor, b * s, k // 16),
-                unswizzle_ref(ref_sf.reshape(-1), b * s, k // 16),
+            ok = (
+                spy.dispatches == ["all_gather_into_tensor_coalesced"]
+                and torch.equal(got.fp4_tensor, ref_fp4)
+                and torch.equal(
+                    unswizzle_ref(got.scaling_factor, b * s, k // 16),
+                    unswizzle_ref(ref_sf.reshape(-1), b * s, k // 16),
+                )
             )
-            _check(ok, f"fp4_quantize shards gathered {(b, s, k)}", device)
+            _check(ok, f"fp4_quantize shards gathered {(b, s, k)}: {spy.dispatches}", device)
 
 
 # =============================================================================
@@ -622,6 +749,18 @@ def _logic_compile_fullgraph(rank, world_size, device):
         args = _chain_inputs(tp, b, s, d, device)
         compare(compiled(*args), chain(*args), b, s, "recompiled")
 
+    # The graph Inductor receives has one coalesced op per NVFP4 boundary (the chain has
+    # three), the bf16 column input gathered as before and the row's reduce-scatter.
+    tp.begin(2, 5)
+    args = _chain_inputs(tp, 2, 5, d, device)
+    ops, got = _graph_collectives(chain, *args)
+    expected = ["all_gather_into_tensor_coalesced"] * 3 + [
+        "all_gather_into_tensor",
+        "reduce_scatter_tensor",
+    ]
+    _check(sorted(ops) == sorted(expected), f"compiled chain collectives: {ops}", device)
+    compare(got, chain(*args), 2, 5, "recorded")
+
 
 def _logic_cuda_graph(rank, world_size, device):
     d = 256
@@ -786,6 +925,7 @@ _WORLD_SIZES = [2, 3, 4]
 _LOGIC_CHECKS = (
     _logic_reduce_scatter,
     _logic_all_gather,
+    _logic_coalesced_gather,
     _logic_rank_disagreement,
     _logic_layout_round_trip,
     _logic_adapters,
