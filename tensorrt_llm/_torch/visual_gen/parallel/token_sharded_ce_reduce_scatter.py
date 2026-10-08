@@ -55,6 +55,40 @@ the destination put in ``done(b - slots)`` after a reduce that depended on ``rea
 ranks pushing different slot sequences end in the signal timeout (a device-side trap), never
 in silent corruption.
 
+Slot state machine and the balance invariant
+--------------------------------------------
+Per slot ``s`` every rank keeps ``uses[s]``, the number of boundaries COMPLETED on it -- by
+:meth:`CeReduceScatter.done` or by :meth:`CeReduceScatter.reset` alike; rank-symmetric because
+every rank runs the same boundary sequence. The flags are one bit per ``(channel, p -> d)``
+(``put_signal`` blocks on a set flag, ``wait_signal`` on a clear one), and a slot is in one of
+three states:
+
+* FRESH (``uses[s] = 0``, nothing in flight): no flag of ``s`` set. Entered by a (re)allocating
+  :meth:`CeReduceScatter.reserve`, which zeroes the pads.
+* IN FLIGHT (``begin`` ran; rank ``r`` has pushed to ``dest_order[:k]``): for each ``d`` in
+  ``dest_order[:k]`` the push waited ``consumed(s)`` ``d -> r`` (unless FRESH) and put
+  ``ready(s)`` ``r -> d``; under rank symmetry ``r`` has received ``ready(s)`` from exactly
+  ``wait_order[:k]`` (source ``p`` reaches ``r`` at its step ``p - r - 1 mod tp``).
+* IDLE (``uses[s] > 0``, nothing in flight): every ``ready(s)`` flag clear, every
+  ``consumed(s)`` flag SET (put by the last completion, to be waited by the destination's next
+  push on ``s``).
+
+``done`` and ``reset`` both take a slot from IN FLIGHT to IDLE through the same four steps
+(``CeReduceScatter._release``): (i) wait ``consumed(s)`` from every destination NOT pushed to
+in this boundary, unless FRESH -- the wait the un-issued push would have done (a no-op from
+``done``, which requires every push); (ii) wait ``ready(s)`` from every source that pushed
+(``wait_order[:k]``) and that ``wait_all`` did not wait; (iii) join the side streams; (iv) put
+``consumed(s)`` to every destination. Invariant (asserted by the CPU test on a fake pool):
+after every completed boundary, for every slot ``s`` and ordered pair ``p -> d``: the
+``ready(s)`` flag is clear and ``puts(ready) = waits(ready)`` = the number of boundaries on
+``s`` in which ``p`` issued its push to ``d`` (``uses[s]`` unless a boundary was cut short
+before that push); the ``consumed(s)`` flag is set iff ``uses[s] > 0``, with
+``puts(consumed) = uses[s]`` and ``waits(consumed) = uses[s] - 1`` (0 when FRESH) -- so the
+next boundary's producer side (one ``consumed`` wait per push) and consumer side (one
+``ready`` wait per source) each find exactly one unconsumed flag per wait, whatever completed
+the previous boundary. A recovery never re-enters FRESH: ``uses[s]`` only grows, so a captured
+graph (whose pushes wait ``consumed``) stays replayable after one.
+
 Streams and CUDA graphs
 -----------------------
 By default one side stream per destination (``tp - 1`` streams; measured 750 vs 731 GB/s and
@@ -100,10 +134,15 @@ until the timeout traps their CUDA context: a "device-side trap" on three of fou
 another rank raised; read that rank's traceback. Shape errors in the op body are checked
 against the plan ints and the weight shape only, which are identical on every rank, so they
 raise on every rank together; a failed op call resets the transport so the next ``begin`` does
-not raise. The reset waits only for the ready flags that were put: a rank-symmetric raise after
-``i`` of the ``tp - 1`` GEMM + push steps (a DeepGEMM failure, say) means every rank received
-exactly the pushes of ``wait_order[:i]``, and :meth:`CeReduceScatter.reset` trims its pending
-set to those before draining it, so the repaired protocol continues without a device trap.
+not raise. :meth:`CeReduceScatter.reset` completes the failed boundary's protocol exactly as
+``done`` would have (the state machine above): a rank-symmetric raise after ``k`` of the
+``tp - 1`` GEMM + push steps (a DeepGEMM failure, say) means every rank pushed to
+``dest_order[:k]`` and received exactly the pushes of ``wait_order[:k]``; the reset waits those
+ready flags only (waiting for the others would spin to the deadline), waits the ``consumed``
+flags of the ``tp - 1 - k`` destinations it never pushed to (still set from the previous
+boundary: a ``consumed`` put onto such a destination without that wait is a second put on a
+set flag, which blocks until the deadline), then puts ``consumed`` to every destination, so the
+repaired protocol continues without a device trap.
 """
 
 import functools
@@ -681,6 +720,12 @@ class CeReduceScatter:
                 f"CeReduceScatter.push: block must be a contiguous bf16 [{layout.rows}, "
                 f"{layout.cols}]; got {block.dtype} {tuple(block.shape)}."
             )
+        # The destination's view is the last host-side raise point (a cache miss carves it
+        # from the pool): resolve it before enqueuing anything, so on every exit of this method
+        # `dst in _pushed_to` <=> 'this push's consumed wait is on dst's side stream' -- the
+        # equivalence _release step (i) relies on to wait that flag exactly once.
+        view = self._peer_view(slot, dst)
+        payload = block.view(torch.uint8).view(-1)
         fork = torch.cuda.Event()
         fork.record(torch.cuda.current_stream())
         stream = self._stream_of[dst]
@@ -688,7 +733,7 @@ class CeReduceScatter:
         with torch.cuda.stream(stream):
             if self._uses[slot] > 0:
                 self.pool.wait(dst, self._consumed_channel(slot))
-            self._peer_view(slot, dst).copy_(block.view(torch.uint8).view(-1))
+            view.copy_(payload)
             self.pool.signal(dst, self._ready_channel(slot))
             pushed = torch.cuda.Event()
             pushed.record(stream)
@@ -750,7 +795,26 @@ class CeReduceScatter:
         self._release(slot)
 
     def _release(self, slot: int) -> None:
-        # One put per wait: consume the ready flags no wait_all() waited for before releasing.
+        # IN FLIGHT -> IDLE with exactly one wait per put on every (channel, p -> d) pair, from
+        # done() and reset() alike (module docstring, "Slot state machine"):
+        #  (i)  consumed(s) from every destination this boundary did NOT push to: the wait its
+        #       un-issued push would have done, skipped on the slot's first use as push skips
+        #       it. A no-op from done(), which requires every push. Without it step (iv) would
+        #       put a second consumed flag onto one the peer never cleared, and put_signal
+        #       blocks on a set flag until the deadline (a device trap on every rank). Relies
+        #       on push() enqueuing its consumed wait only after its last host-side raise
+        #       point: `dst in _pushed_to` <=> 'its consumed wait is enqueued'.
+        #  (ii) ready(s) from every source whose push arrived but wait_all() did not wait.
+        #  (iii) join every push into the current stream.
+        #  (iv) consumed(s) to every destination: its next push on this slot waits it.
+        # Invariant afterwards, per pair: the ready flag clear with puts(ready) == waits(ready)
+        # (this boundary's put, when its push was issued, waited by wait_all() or by (ii)); the
+        # consumed flag set with puts(consumed) == uses[slot] and waits(consumed) ==
+        # uses[slot] - 1 (uses[slot] counting this completion).
+        if self._uses[slot] > 0:
+            for dst in self.dest_order:
+                if dst not in self._pushed_to[slot]:
+                    self.pool.wait(dst, self._consumed_channel(slot))
         for src in sorted(self._ready_pending[slot]):
             self.pool.wait(src, self._ready_channel(slot))
         self._ready_pending[slot].clear()
@@ -774,17 +838,20 @@ class CeReduceScatter:
                 )
 
     def reset(self) -> None:
-        """Recover from a failed boundary: release every slot in flight (consume the ready flags
-        that were put, join the side streams, signal consumed), so the next ``begin`` does not
-        raise. Repairs the protocol when every rank failed at the same point; a peer that is
-        already trapped cannot be helped.
+        """Recover from a failed boundary (the op's except path): take every slot in flight to
+        IDLE exactly as :meth:`done` would have (module docstring, "Slot state machine"), so
+        the next ``begin`` does not raise and every peer's next push and wait on the slot find
+        balanced flags. Repairs the protocol when every rank failed at the same point (a
+        rank-symmetric raise); a peer that is already trapped cannot be helped. A slot not in
+        flight (a raise before ``begin``) is left alone: its flags are already balanced.
 
-        Under rank symmetry a rank that pushed to its first ``i`` destinations received the
-        pushes of exactly ``wait_order[:i]`` (source ``s`` reaches rank ``r`` at its step
-        ``s - r - 1 mod tp``), so only those ready flags are waited for; waiting for the others
-        would spin to the deadline. Signalling ``consumed`` to every destination stays right: a
-        destination that did not push to us consumes the extra flag at its next push, in place
-        of the ``done`` of the failed boundary that never ran."""
+        Under rank symmetry a rank that pushed to its first ``k`` destinations received the
+        pushes of exactly ``wait_order[:k]`` (source ``s`` reaches rank ``r`` at its step
+        ``s - r - 1 mod tp``), so the pending ready set is trimmed to those before the release
+        (waiting for the others would spin to the deadline); the release then also waits the
+        ``consumed`` flags of the ``tp - 1 - k`` destinations never pushed to, which a plain
+        ``consumed`` put would otherwise double, and puts ``consumed`` to every destination.
+        The slot counts the recovery as a use: it never re-enters first-use state."""
         for slot in range(self.slots):
             if self._in_flight[slot]:
                 pushed = len(self._pushed_to[slot])
