@@ -16,7 +16,9 @@
 
 ``token_sharded_tp`` holds the token plan, the collectives and the model's sharder,
 ``token_sharded_modules`` the adapters that convert a model's tensor-parallel modules,
-``symm_mem_pool`` the symmetric-memory allocation that copy-engine collectives push into and
+``symm_mem_pool`` the symmetric-memory allocation that copy-engine collectives push into,
 ``token_sharded_ce_gather`` the copy-engine all-gather over it and the body of the fused
-``trtllm::token_sharded_fp8_ce_gather_gemm`` op.
+``trtllm::token_sharded_fp8_ce_gather_gemm`` op, and ``token_sharded_ce_reduce_scatter`` the
+copy-engine reduce-scatter over its own pool, its fixed-order fp32 reduce and the body of the
+fused ``trtllm::token_sharded_fp8_ce_gemm_reduce_scatter`` op.
 """
