@@ -1174,13 +1174,18 @@ class TokenShardedTP:
         rank, pushes each block with copy engines and reduces the landed partials in fp32 in
         source-rank order. Returns this rank's reduced ``[m, N]`` bf16 rows (the
         :meth:`reduce_scatter` of the padded partial, with ``consumer.bias`` applied as the
-        NCCL path applies it: rank 0's bias enters source 0's partial in bf16). Call only when
+        NCCL path applies it: once per output row, as bf16(source 0's block + bias), by every
+        destination's reduce). Call only when
         :meth:`uses_ce_reduce_scatter`.
         """
         p = self.plan
         x = quantize_fp8_block(self.pad_row_input(act))
         fp8, scale = self._check_fp8(x, "ce_gemm_reduce_scatter", rows=p.padded_rows)
-        bias = consumer.bias if p.tp_rank == 0 else None
+        # Every destination adds the bias once, to source 0's block, inside its reduce: the
+        # NCCL path folds it into rank 0's partial before the collective, which reaches every
+        # destination; here the partial blocks travel unbiased, so the (replicated) bias
+        # parameter is passed on every rank, not only on tp_rank 0.
+        bias = consumer.bias
         return torch.ops.trtllm.token_sharded_fp8_ce_gemm_reduce_scatter(
             fp8,
             scale,

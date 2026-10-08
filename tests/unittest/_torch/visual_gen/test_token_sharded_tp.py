@@ -1122,7 +1122,7 @@ def test_ce_gemm_reduce_scatter_traced_part(batch, seq, tp, monkeypatch):
         assert fp8.shape == (plan.padded_rows, k_local) and fp8.dtype == torch.float8_e4m3fn
         assert sf.shape == (plan.padded_rows, fp8_scale_cols(k_local)) and sf.dtype == torch.int32
         assert w is consumer.weight and w_sf is consumer.weight_scale
-        assert (bias is consumer.bias) if rank == 0 else (bias is None)
+        assert bias is consumer.bias  # every destination adds the bias once (source 0's block)
         assert group_name == "simulated"
         assert ints == [rank, tp, batch, seq, plan.padded_seq_len]
         # The adapter's view of the result: [n, g, N] sample groups.
