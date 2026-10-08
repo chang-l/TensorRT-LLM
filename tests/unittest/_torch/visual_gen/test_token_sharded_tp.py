@@ -410,7 +410,9 @@ def _mlp_adapter(base):
         seen.append(prequantize)
         raise _Stop
 
-    module._token_sharded_tp = SimpleNamespace(gather_input=gather_input)
+    module._token_sharded_tp = SimpleNamespace(
+        gather_input=gather_input, uses_ce_gather=lambda consumer, x, lora_params: False
+    )
     module.up_proj = object()
     return module, seen
 
