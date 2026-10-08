@@ -830,7 +830,7 @@ def test_copy_engine_probe_falls_back_on_gloo(monkeypatch):
         assert ts.effective_gather_mode == "nccl"
         reason = ts._ce_state.reason
         assert reason and len(warnings) == 1 and reason in warnings[0]
-        assert "keeping the NCCL all-gather" in warnings[0]
+        assert "keeping the NCCL path" in warnings[0]  # the protocol base's one fallback warning
         ts.begin(2, 8)
         other = simulated_helper(plan, gather_mode="copy_engine")
         other.group, other.group_name = group, group.group_name

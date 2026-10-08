@@ -21,10 +21,14 @@ asymmetric raises the base cannot repair (pinned as the trap or the unmatched co
 release that raises; ``signal_write``'s lost put; the join of exactly the forked copy streams;
 the growth guard; the per-slot capture note; the resync latch; the generic arrival rule; and
 the per-group state's probe fallback, setup failure and registry lifecycle on a one-rank gloo
-group.
+group. Then the token-sharded TP all-gather (``CeAllGather``) on the same fabric: its wiring of
+the base, the signal balance of its boundaries and recoveries, and the three behaviours it gained
+from the base (recovery from a raise inside the push loop, the capture mark on completion, the
+resync latch).
 """
 
 import contextlib
+import itertools
 from collections import Counter
 
 import pytest
@@ -39,6 +43,11 @@ from tensorrt_llm._torch.distributed.ce_protocol import (
     CopyStreams,
 )
 from tensorrt_llm._torch.distributed.symm_mem_pool import DEFAULT_TIMEOUT_MS, PoolLayout
+from tensorrt_llm._torch.visual_gen.parallel import token_sharded_ce_gather as tsc
+from tensorrt_llm._torch.visual_gen.parallel.token_sharded_ce_gather import (
+    CeAllGather,
+    RegionLayout,
+)
 
 pytestmark = pytest.mark.cpu_only
 
@@ -117,6 +126,7 @@ class _Fabric:
         self.lost: Counter = Counter()  # (channel, src, dst) -> signal_write puts onto a set flag
         self.capturing = False
         self.transports: list[CeTransport] = []  # every rank's transport, for the resync gather
+        self.pools: dict[int, "_FakePool"] = {}  # rank -> its pool, for the gather's peer regions
         self.resyncs = 0
         self.reported: dict[int, int] = {}  # rank -> the count it reported in this round
         self.counts_override: dict[int, int] = {}  # rank -> boundary count the gather reports
@@ -1415,6 +1425,451 @@ def test_probe_once_releases_the_pool_when_make_transport_raises(gloo_world, rec
     assert state.probe_once(min_channels=2, what="toy exchange") is False and probes == [2]
     state.close()
     assert state.made.releases == 1 and state.reason == "closed"
+
+
+# =============================================================================
+# The copy-engine all-gather of token-sharded TP on the base: the real CeAllGather (its layout,
+# channels and schedule) on the same fabric -- the wiring, the signal balance after plain
+# boundaries and after a rank-symmetric raise at every point of the boundary, and the three
+# behaviours its own transport did not have: the recovery from a raise inside the push loop,
+# the capture mark on completion, the resync latch
+# =============================================================================
+
+
+class _GatherPool(_FakePool):
+    """``_FakePool`` plus the byte regions the all-gather copies through: one CPU buffer per
+    rank, the peers' reachable through the fabric (``peer_region``), and the gather's four data
+    channels (ready and consumed per slot)."""
+
+    def __init__(self, fabric: _Fabric, rank: int):
+        super().__init__(fabric, rank, channels=2 * tsc.SLOTS)
+        self.buf = torch.empty(0, dtype=torch.uint8)
+        fabric.pools[rank] = self
+
+    def reserve(self, slot_nbytes: int, slots: int, min_channels: int) -> bool:
+        realloc = super().reserve(slot_nbytes, slots, min_channels)
+        if realloc:
+            self.buf = torch.zeros(self._layout.nbytes, dtype=torch.uint8)
+        return realloc
+
+    def region(self, slot: int, src_rank: int, offset: int, nbytes: int) -> torch.Tensor:
+        start, stop = self._layout.region_span(slot, src_rank, offset, nbytes)
+        return self.buf[start:stop]
+
+    def peer_region(self, peer: int, slot: int, offset: int, nbytes: int) -> torch.Tensor:
+        start, stop = self._layout.region_span(slot, self.rank, offset, nbytes)
+        return self.fabric.pools[peer].buf[start:stop]
+
+
+def _gather_fabric(world_size: int, monkeypatch) -> _Fabric:
+    fabric = _Fabric(world_size)
+    fabric.install(monkeypatch)
+    monkeypatch.setattr(tsc, "_is_capturing", fabric.is_capturing)
+    return fabric
+
+
+_M, _K = 8, 128  # rows per rank and K of the fabric boundaries (one packed scale column)
+_LAYOUT = RegionLayout(_M, _K)
+
+
+def _gathers(fabric: _Fabric, layout: RegionLayout = _LAYOUT) -> list[CeAllGather]:
+    transports = []
+    for r in range(fabric.world_size):
+        fabric.rank = r
+        transports.append(CeAllGather(_GatherPool(fabric, r), fabric.world_size, r, CPU))
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        assert t.reserve(layout) is True
+    fabric.transports = transports
+    return transports
+
+
+@pytest.mark.parametrize("world_size", [2, 3, 4, 8])
+def test_gather_transport_wires_the_base(world_size, monkeypatch):
+    """``CeAllGather`` is a ``CeTransport`` with the gather's orders -- it pushes to ``me - 1,
+    me - 2, ...`` and consumes (so its pushes arrive) from ``me + 1, me + 2, ...`` -- on one side
+    stream, two slots and four channels; its reserve is the base's under the gather's layout,
+    with the gather's post-check and its first-use reset on a reallocation."""
+    fabric = _gather_fabric(world_size, monkeypatch)
+    fabric.rank = 1
+    pool = _GatherPool(fabric, 1)
+    t = CeAllGather(pool, world_size, 1, CPU)
+    assert isinstance(t, CeTransport) and t.pool is pool and t.slots == tsc.SLOTS == 2
+    assert t.tp_size == t.world_size == world_size and t.rank == 1
+    assert t.push_order == tuple((1 - i) % world_size for i in range(1, world_size))
+    assert t.consume_order == tuple((1 + i) % world_size for i in range(1, world_size))
+    assert t.arrival_order == t.consume_order
+    assert len(t.streams) == 1 and t.min_channels == 4 == pool.channels
+    assert t.slot_nbytes == 0 and not t.covers(_LAYOUT) and not pool.reserved
+    with pytest.raises(ValueError, match="world_size >= 2"):
+        CeAllGather(pool, 1, 0, CPU)
+    with pytest.raises(ValueError, match="0 <= rank < world_size"):
+        CeAllGather(pool, world_size, world_size, CPU)
+    assert t.reserve(_LAYOUT) is True and pool.generation == 1
+    assert t.covers(_LAYOUT) and t.slot_nbytes >= _LAYOUT.slot_nbytes(world_size)
+    assert t.slot_nbytes == pool.slot_nbytes and pool.slots == 2
+    assert t.reserve(RegionLayout(1, 128)) is False  # covered: no-op
+    t._uses = [2, 2]
+    bigger = RegionLayout(4 * _M, 5120)
+    assert t.reserve(bigger) is True and pool.generation == 2
+    assert t._uses == [0, 0]  # a reallocation zeroes the pads: every slot is at its first use
+    assert t.covers(_LAYOUT) and t.covers(bigger)
+    t.close()
+    assert pool.releases == 1 and t.slot_nbytes == 0 and not t.covers(_LAYOUT)
+
+
+_SEEDS = itertools.count(1)
+
+
+def _rows(seed: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """One rank's quantized rows: fp8 ``[m, K]`` bytes and MN-major int32 packed scales."""
+    gen = torch.Generator().manual_seed(seed)
+    fp8 = torch.randint(0, 256, (_M, _K), dtype=torch.uint8, generator=gen)
+    sf = torch.randint(0, 2**31 - 1, (_M, _LAYOUT.scale_cols), generator=gen).to(torch.int32)
+    return fp8.view(torch.float8_e4m3fn), tsc.mn_major_scales(sf)
+
+
+def _gather_raise_points(world_size: int) -> list:
+    """Every point of a gather boundary a rank-symmetric raise can hit: before ``issue``;
+    inside the push loop after ``k`` ready pushes (the put of the ``k + 1``-th refused, its
+    consumed wait and copies already enqueued); after ``j`` remote chunks (``j = 0``: after
+    ``issue`` and the own chunk, inside the first GEMM); after the last chunk, before ``done``.
+    """
+    return [
+        "before_open",
+        *(("push", k) for k in range(world_size - 1)),
+        *(("chunk", j) for j in range(world_size - 1)),
+        "before_done",
+    ]
+
+
+def _gather_raise_cases(world_sizes=(2, 3, 4, 8)) -> list:
+    return [
+        pytest.param(
+            p, fail, id=f"P{p}-{fail if isinstance(fail, str) else fail[0] + str(fail[1])}"
+        )
+        for p in world_sizes
+        for fail in _gather_raise_points(p)
+    ]
+
+
+@contextlib.contextmanager
+def _put_refused(pool: _FakePool, after: int, channel: int):
+    """The pool refuses the ``after + 1``-th put on ``channel``: a launch that fails inside
+    ``mark_pushed``, after the consumed wait and the copies of that push were enqueued."""
+    real, puts = pool.signal, 0
+
+    def signal(peer, ch):
+        nonlocal puts
+        if ch == channel:
+            if puts == after:
+                raise RuntimeError(f"injected in the push loop after {after} pushes")
+            puts += 1
+        real(peer, ch)
+
+    pool.signal = signal
+    try:
+        yield
+    finally:
+        del pool.signal
+
+
+def _gather_boundary(fabric: _Fabric, transports: list[CeAllGather], slot: int, fail=None):
+    """One all-gather boundary on every rank, enqueued in rank order as the op body does
+    (``issue``, the own chunk, each remote chunk in consume order, ``done``), then run on the
+    fabric; ``fail`` injects the op's raise (:func:`_gather_raise_points`) and its except path
+    (``reset``), as :func:`_boundary` does. After a plain boundary every rank's rows are in
+    every peer's slot: the layout's producer views land where its consumer views read."""
+    world_size = len(transports)
+    fabric.reported = {}
+    rows = {r: _rows(next(_SEEDS)) for r in range(world_size)}
+    ready = transports[0]._ready_channel(slot)
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        point = fail.get(r) if isinstance(fail, dict) else fail
+        refused = contextlib.nullcontext()
+        if isinstance(point, tuple) and point[0] == "push":
+            refused = _put_refused(t.pool, point[1], ready)
+        try:
+            if point == "before_open":
+                raise RuntimeError("injected before open")
+            with refused:
+                t.issue(*rows[r], slot)
+            own = t.chunk(r, slot)
+            assert own[0] is rows[r][0] and own[1] is rows[r][1]  # no copy, no wait
+            for j, src in enumerate(t.consume_order):
+                if point == ("chunk", j):
+                    raise RuntimeError(f"injected after {j} remote chunks")
+                fp8, sf = t.chunk(src, slot)
+                assert fp8.shape == (_M, _K) and fp8.dtype == torch.float8_e4m3fn
+                assert sf.shape == (_M, _LAYOUT.scale_cols) and sf.stride() == (1, _M)
+            if point == "before_done":
+                raise RuntimeError("injected before done")
+            t.done(slot)
+        except RuntimeError as e:
+            assert point is not None and str(e).startswith("injected"), e
+            t.reset()
+    fabric.assert_collectives_matched()
+    fabric.run()
+    if fail is None:
+        for r, t in enumerate(transports):
+            for src in range(world_size):
+                if src == r:
+                    continue
+                region = t.pool.region(slot, src, 0, _LAYOUT.region_nbytes)
+                fp8, sf = _LAYOUT.consumer_views(region)
+                assert torch.equal(fp8.view(torch.uint8), rows[src][0].view(torch.uint8))
+                assert torch.equal(sf, rows[src][1])
+
+
+def _assert_gather_balanced(fabric: _Fabric, transports: list[CeAllGather]) -> None:
+    """The gather's invariant after every completed boundary (``done`` or ``reset``): no slot
+    in flight, no stream with a pending op, every rank at the same boundary and use counts,
+    and per slot: every ready flag clear with ``puts = waits``; every consumed credit present
+    exactly once on a slot that was used (``puts = uses = waits + 1``), none before its first
+    use; no resync round left unmatched."""
+    fabric.assert_collectives_matched()
+    assert not any(any(t._in_flight) for t in transports)
+    assert all(s.done == len(s.ops) for s in fabric.streams)
+    assert len({t._boundaries for t in transports}) == 1
+    assert len({tuple(t._uses) for t in transports}) == 1
+    world = fabric.world_size
+    for slot in range(tsc.SLOTS):
+        ready = transports[0]._ready_channel(slot)
+        consumed = transports[0]._consumed_channel(slot)
+        uses = transports[0]._uses[slot]
+        for p in range(world):
+            for d in range(world):
+                if p == d:
+                    continue
+                key = (ready, p, d)
+                assert fabric.flags.get(key, 0) == 0, ("ready flag set", key)
+                assert fabric.puts[key] == fabric.waits[key], key
+                key = (consumed, p, d)
+                credit = int(uses > 0)
+                assert fabric.flags.get(key, 0) == credit, ("credit", key, uses)
+                assert fabric.puts[key] == uses and fabric.waits[key] == uses - credit, key
+
+
+@pytest.mark.parametrize("world_size", [2, 3, 4, 8])
+def test_gather_boundaries_keep_the_signals_balanced(world_size, monkeypatch):
+    """Plain boundaries alternating the two slots: the ready flags balance within each
+    boundary, the consumed credits across them, no collective runs, every rank reads every
+    peer's rows; drain between forwards and a covered reserve touch no flag."""
+    fabric = _gather_fabric(world_size, monkeypatch)
+    transports = _gathers(fabric)
+    for index in range(3 * tsc.SLOTS):
+        _gather_boundary(fabric, transports, index % tsc.SLOTS)
+        _assert_gather_balanced(fabric, transports)
+    assert all(t._boundaries == 3 * tsc.SLOTS and t._uses == [3, 3] for t in transports)
+    assert fabric.resyncs == 0
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        t.drain()
+        assert t.reserve(_LAYOUT) is False
+    fabric.run()
+    _assert_gather_balanced(fabric, transports)
+
+
+def test_gather_boundary_enqueues_the_protocol_sequence(monkeypatch):
+    """What one boundary enqueues, on rank 0 of 3 (push order 2, 1; consume order 1, 2): the
+    side stream forks once per peer and carries, per peer, the consumed wait (not on the slot's
+    first use) and the ready put behind the copies; the current stream waits each source's
+    ready flag at its chunk, joins the side stream and puts the consumed credit to every peer
+    in push order. Channels: ready(s) = s, consumed(s) = 2 + s."""
+    fabric = _gather_fabric(3, monkeypatch)
+    transports = _gathers(fabric)
+    main, side = fabric.main[0], transports[0].streams.stream(1)
+    assert side is transports[0].streams.stream(2)  # one side stream
+
+    def kinds(stream):
+        return ["event" if op[0] == "event" else op for op in stream.ops]
+
+    _gather_boundary(fabric, transports, 0)  # the first use of slot 0: no consumed waits
+    assert kinds(side) == ["event", ("put", 0, 0, 2), "event", ("put", 0, 0, 1)]
+    assert kinds(main) == [
+        ("wait", 0, 1, 0),
+        ("wait", 0, 2, 0),
+        "event",
+        ("put", 2, 0, 2),
+        ("put", 2, 0, 1),
+    ]
+    _gather_boundary(fabric, transports, 1)
+    n_side, n_main = len(side.ops), len(main.ops)
+    _gather_boundary(fabric, transports, 0)  # slot 0 again: each peer's credit before its push
+    assert kinds(side)[n_side:] == [
+        "event",
+        ("wait", 2, 2, 0),
+        ("put", 0, 0, 2),
+        "event",
+        ("wait", 2, 1, 0),
+        ("put", 0, 0, 1),
+    ]
+    assert kinds(main)[n_main:] == [
+        ("wait", 0, 1, 0),
+        ("wait", 0, 2, 0),
+        "event",
+        ("put", 2, 0, 2),
+        ("put", 2, 0, 1),
+    ]
+    _assert_gather_balanced(fabric, transports)
+
+
+@pytest.mark.parametrize("warm", [False, True], ids=["cold", "warm"])
+@pytest.mark.parametrize("world_size,fail", _gather_raise_cases())
+def test_gather_reset_after_a_rank_symmetric_raise_keeps_the_signals_balanced(
+    world_size, fail, warm, monkeypatch
+):
+    """The gather on the base's recovery: a rank-symmetric raise at every point of a boundary,
+    on a slot's first use (cold) and after good boundaries on both slots (warm): ``reset``
+    completes the boundary like ``done`` (the balance invariant holds right after it), no
+    device would trap, the next eager ``issue`` runs the resync collective exactly once per
+    rank, and the following boundaries are plain ones. The points inside the push loop are the
+    recovery the gather's own transport did not have (its slot was not in flight before the
+    loop ended, so a raise there left the peers' ready flags unwaited)."""
+    fabric = _gather_fabric(world_size, monkeypatch)
+    transports = _gathers(fabric)
+    index = 0
+    for _ in range(2 * tsc.SLOTS if warm else 0):
+        _gather_boundary(fabric, transports, index % tsc.SLOTS)
+        _assert_gather_balanced(fabric, transports)
+        index += 1
+    before = transports[0]._boundaries
+    _gather_boundary(fabric, transports, index % tsc.SLOTS, fail=fail)
+    _assert_gather_balanced(fabric, transports)
+    completed = fail != "before_open"  # nothing was in flight: reset() had nothing to release
+    assert all(t._boundaries == before + int(completed) for t in transports)
+    assert all(t._needs_resync for t in transports)
+    index += 1
+    for _ in range(2 * tsc.SLOTS):
+        _gather_boundary(fabric, transports, index % tsc.SLOTS)
+        _assert_gather_balanced(fabric, transports)
+        index += 1
+    assert fabric.resyncs == world_size  # one gather per rank, at the first issue after the reset
+    assert not any(t._needs_resync for t in transports)
+
+
+@pytest.mark.parametrize("world_size,k", [(2, 0), (3, 1), (4, 2), (8, 4)])
+def test_gather_recovers_from_a_raise_inside_the_push_loop(world_size, k, monkeypatch):
+    """NEW on the base (the gather's own transport put the slot in flight only after the loop,
+    so a raise inside it left the peers' ready flags unwaited and ``reset`` nothing to
+    balance): after ``k`` ready pushes the slot is in flight; ``reset`` trims the owed ready
+    waits to the ``k`` sources whose pushes reached this rank (the mirror of the push order),
+    waits them, joins the side stream, waits the consumed credits the loop did not reach (the
+    ``k + 1``-th push's was spent before its put was refused), re-credits every peer, and the
+    next boundary on the slot is a plain one."""
+    fabric = _gather_fabric(world_size, monkeypatch)
+    transports = _gathers(fabric)
+    for slot in range(tsc.SLOTS):  # warm: every slot past its first use
+        _gather_boundary(fabric, transports, slot)
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        with (
+            pytest.raises(RuntimeError, match=f"injected in the push loop after {k} pushes"),
+            _put_refused(t.pool, k, 0),
+        ):
+            t.issue(*_rows(r), 0)
+        assert t._in_flight[0] and t._spent[0] == min(k + 1, world_size - 1)
+        assert t._pushed_to[0] == {(d, 0) for d in t.push_order[:k]}
+        assert t._arrived(0) == {(s, 0) for s in t.consume_order[:k]}
+        start = len(fabric.main[r].ops)
+        t.reset()
+        kinds = [op[0] if op[0] == "event" else op for op in fabric.main[r].ops[start:]]
+        assert kinds == [
+            *(("wait", 0, s, r) for s in sorted(t.consume_order[:k])),
+            "event",
+            *(("wait", 2, p, r) for p in t.push_order[k + 1 :]),
+            *(("put", 2, r, p) for p in t.push_order),
+            "event",  # join_all_eager: the side stream once more
+        ]
+        assert not t._in_flight[0] and t._uses[0] == 2 and t._needs_resync
+    fabric.run()
+    _assert_gather_balanced(fabric, transports)
+    _gather_boundary(fabric, transports, 0)
+    _assert_gather_balanced(fabric, transports)
+    assert fabric.resyncs == world_size
+
+
+def test_gather_capture_mark_is_set_when_the_captured_boundary_completes(monkeypatch):
+    """NEW on the base (the gather's own transport marked itself captured at ``issue``): a
+    slot's first use under capture is refused before the slot opens; a boundary that raises
+    under capture leaves no mark (its capture is discarded; ``reset`` joins only the forked side
+    stream); a captured boundary that completes marks the transport, after which a growing
+    reserve is refused and a covered one is not."""
+    fabric = _gather_fabric(3, monkeypatch)
+    transports = _gathers(fabric)
+    fabric.rank = 0
+    fabric.capturing = True
+    with pytest.raises(RuntimeError, match="first use of slot 0 under CUDA-graph capture"):
+        transports[0].issue(*_rows(0), 0)
+    assert not transports[0]._in_flight[0] and transports[0]._capturing == [False, False]
+    fabric.capturing = False
+    for slot in range(tsc.SLOTS):
+        _gather_boundary(fabric, transports, slot)  # the eager first uses
+    fabric.capturing = True
+    _gather_boundary(fabric, transports, 0, fail=("push", 1))  # raised under capture
+    _assert_gather_balanced(fabric, transports)
+    assert all(not t._captured and not any(t._capturing) and t._needs_resync for t in transports)
+    fabric.capturing = False
+    _gather_boundary(fabric, transports, 1)  # eager: the resync runs, the latch clears
+    assert fabric.resyncs == 3 and all(not t._captured for t in transports)
+    fabric.capturing = True
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        t.issue(*_rows(r), 0)
+        assert t._capturing == [True, False] and not t._captured  # noted, not yet promoted
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        for src in (r, *t.consume_order):
+            t.chunk(src, 0)
+        t.done(0)
+        assert t._captured and t._capturing == [False, False]  # promoted on completion
+    fabric.run()
+    _assert_gather_balanced(fabric, transports)
+    fabric.capturing = False
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        assert t.reserve(_LAYOUT) is False  # covered: allowed after the capture
+        with pytest.raises(RuntimeError, match="would grow after a CUDA graph"):
+            t.reserve(RegionLayout(2 * _M, _K))
+        assert t.pool.generation == 1
+    _gather_boundary(fabric, transports, 1)
+    assert all(t._captured for t in transports)  # stays: a graph holds the addresses
+
+
+def test_gather_first_eager_issue_after_a_reset_resyncs_once(recorder, monkeypatch):
+    """NEW on the base: after a failed boundary the first eager ``issue`` on each rank
+    all-gathers the boundary counts once (a warning names the gather first), a latched
+    transport refuses ``issue`` under capture with the slot idle, a disagreement raises
+    ``CeResyncError`` out of ``issue`` with the slot idle and the latch kept, and nothing runs
+    on the hot path afterwards."""
+    fabric = _gather_fabric(3, monkeypatch)
+    transports = _gathers(fabric)
+    _gather_boundary(fabric, transports, 0)
+    _gather_boundary(fabric, transports, 1, fail=("chunk", 1))
+    assert all(t._needs_resync for t in transports) and fabric.resyncs == 0
+    fabric.rank = 0
+    fabric.capturing = True
+    with pytest.raises(RuntimeError, match="run one eager call before capturing"):
+        transports[0].issue(*_rows(0), 0)
+    assert not transports[0]._in_flight[0] and fabric.resyncs == 0
+    fabric.capturing = False
+    fabric.counts_override = {2: 7}
+    with pytest.raises(CeResyncError, match="rank 0: 2, rank 1: 2, rank 2: 7"):
+        transports[0].issue(*_rows(0), 0)
+    assert not transports[0]._in_flight[0] and transports[0]._needs_resync
+    assert fabric.resyncs == 1 and transports[0]._uses == [1, 1]
+    fabric.counts_override = {}
+    _gather_boundary(fabric, transports, 0)
+    _assert_gather_balanced(fabric, transports)
+    assert fabric.resyncs == 4 and not any(t._needs_resync for t in transports)
+    assert len(recorder.warnings) == 4 and all(
+        w.startswith("CeAllGather[fake3]: resync after a failed boundary (this rank completed 2)")
+        for w in recorder.warnings
+    )
+    _gather_boundary(fabric, transports, 1)
+    _assert_gather_balanced(fabric, transports)
+    assert fabric.resyncs == 4  # one collective per recovery, nothing on the hot path
 
 
 if __name__ == "__main__":
