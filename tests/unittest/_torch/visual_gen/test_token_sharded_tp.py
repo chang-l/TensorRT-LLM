@@ -624,7 +624,8 @@ def test_uses_ce_gather_rule(monkeypatch):
     """The fused path takes an FP8 block-scale consumer's bf16 or FP8 input, with no active
     LoRA, once the probe accepted the mode; everything else stays on gather_input."""
     monkeypatch.setattr(token_sharded_tp, "is_sm_100f", lambda: True)
-    fp8, bf16 = _fp8_block_linear(), Linear(256, 128, bias=False, dtype=torch.bfloat16)
+    fp8 = _as_tp(_fp8_block_linear(), TensorParallelMode.COLUMN)
+    bf16 = _as_tp(Linear(256, 128, bias=False, dtype=torch.bfloat16), TensorParallelMode.COLUMN)
     ts = simulated_helper(TokenShardPlan.build(2, 8, 2, 0), gather_mode="copy_engine")
     x = torch.zeros(8, 256, dtype=torch.bfloat16)
     pair = Fp8BlockScaledActivation(
@@ -641,6 +642,9 @@ def test_uses_ce_gather_rule(monkeypatch):
     assert not ts.uses_ce_gather(fp8, x, lora_params={"adapter": 1})  # active LoRA
     assert not ts.uses_ce_gather(bf16, x)  # not an FP8 block-scale consumer
     assert not ts.uses_ce_gather(None, x)
+    # a row projection (reduce-scatter side) never takes the gather path, FP8 or not
+    assert not ts.uses_ce_gather(_as_tp(_fp8_block_linear(), TensorParallelMode.ROW), x)
+    assert not ts.uses_ce_gather(_fp8_block_linear(), x)  # no TP metadata at all
     assert not ts.uses_ce_gather(_fp8_block_linear(disable_deep_gemm=True), x)
     assert not ts.uses_ce_gather(fp8, x.float())  # not bf16
     fp4 = Fp4QuantizedTensor(
@@ -698,7 +702,8 @@ def test_copy_engine_lifecycle_effective(monkeypatch):
     monkeypatch.setattr(token_sharded_tp, "is_sm_100f", lambda: True)
     plan = TokenShardPlan.build(2, 8, 2, 0)
     ts = simulated_helper(plan, gather_mode="copy_engine")
-    fp8, bf16 = _fp8_block_linear(), Linear(256, 128, bias=False, dtype=torch.bfloat16)
+    fp8 = _as_tp(_fp8_block_linear(), TensorParallelMode.COLUMN)
+    bf16 = _as_tp(Linear(256, 128, bias=False, dtype=torch.bfloat16), TensorParallelMode.COLUMN)
     ts.note_consumer(fp8)
     ts.note_consumer(bf16)
     ts.begin(2, 8)
