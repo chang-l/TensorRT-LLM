@@ -34,10 +34,18 @@ quantize, per peer ``p`` in :attr:`CeAllGather.push_order`::
 
 Consumer, :meth:`CeAllGather.chunk`, on the current stream: the own chunk returns the local
 tensors; a remote ``src`` waits ``ready(s)`` from ``src`` and returns views of its region in my
-slot. :meth:`CeAllGather.done` makes the current stream wait on the side stream's pushed event
-(the fork is joined every boundary) and signals ``consumed(s)`` to every peer. Channels:
-``ready(s) = s``, ``consumed(s) = slots + s``. Two slots alternate per boundary so a rank can
-push boundary ``b + 1`` while its peers still read ``b``.
+slot. :meth:`CeAllGather.done` waits the ready flags no chunk consumed, joins the side stream
+into the current stream (the fork is joined every boundary) and signals ``consumed(s)`` to
+every peer. Channels: ``ready(s) = s``, ``consumed(s) = slots + s``. Two slots alternate per
+boundary so a rank can push boundary ``b + 1`` while its peers still read ``b``.
+
+The boundary bookkeeping is :class:`~tensorrt_llm._torch.distributed.ce_protocol.CeTransport`'s
+(``open`` / ``mark_pushed`` / ``wait_ready`` / ``done``, the side stream, the view cache, the
+reserve rules, ``reset`` and the resync after it); this module holds the layout, the channels
+and the schedule. The ``consumed`` credit is the gather's own, as it lives across boundaries:
+put at the release of boundary ``b``, waited by ``issue(b + slots)``; after a raise inside the
+push loop the release waits the credits the loop did not reach, so every peer holds exactly
+one again.
 
 Every wait is satisfiable: ``ready(s)`` of boundary ``b`` is put by every producer inside its
 ``issue(b)``, which each rank calls before its first ``chunk(b)`` wait; ``consumed(s)`` waited
@@ -80,7 +88,9 @@ A rank that raises between ``issue`` and ``done`` leaves its peers spinning in `
 until the timeout traps their CUDA context: a "device-side trap" on three of four ranks means
 another rank raised; read that rank's traceback. Shape errors in the op body are checked
 against the plan ints only, which are identical on every rank, so they raise on every rank
-together; a failed op call resets the transport so the next ``begin`` does not raise.
+together; a failed op call resets the transport so the next ``begin`` does not raise, and the
+first eager boundary after it agrees the ranks' boundary counts once
+(:class:`~tensorrt_llm._torch.distributed.ce_protocol.CeResyncError` when they differ).
 """
 
 import math
@@ -94,12 +104,8 @@ from tensorrt_llm import deep_gemm
 from tensorrt_llm.logger import logger
 from tensorrt_llm.math_utils import pad_up
 
-from ...distributed.symm_mem_pool import (
-    DEFAULT_ALIGN,
-    DEFAULT_TIMEOUT_MS,
-    SymmMemPool,
-    probe_symmetric_memory,
-)
+from ...distributed.ce_protocol import CeResyncError, CeState, CeTransport, _is_capturing
+from ...distributed.symm_mem_pool import DEFAULT_ALIGN, DEFAULT_TIMEOUT_MS, SymmMemPool
 from ...modules.linear import FP8BlockScalesLinearMethod, Linear
 from .token_sharded_tp import FP8_BLOCK_SIZE, drop_padding, fp8_scale_cols
 
@@ -347,12 +353,15 @@ def validate_fp8_block_consumer(linear: object) -> None:
 # =============================================================================
 
 
-class CeAllGather:
+class CeAllGather(CeTransport):
     """Per-source copy-engine all-gather over a ``SymmMemPool`` (see the module docstring).
 
-    Owns the pool for its lifetime (data channels ``0 .. 2 * slots - 1``). Per boundary:
-    :meth:`issue`, :meth:`chunk` for the own rank and each source in :attr:`consume_order`,
-    :meth:`done`. :meth:`reserve` sizes the pool eagerly and collectively.
+    The boundary bookkeeping, the side stream, the view cache, the reserve rules and the
+    recovery path are :class:`CeTransport`'s; this class holds the gather's layout, channels
+    and schedule. Owns the pool for its lifetime (data channels ``0 .. 2 * slots - 1``). Per
+    boundary: :meth:`issue`, :meth:`chunk` for the own rank and each source in
+    :attr:`consume_order`, :meth:`done`. :meth:`reserve` sizes the pool eagerly and
+    collectively.
 
     Args:
         pool: The TP group's pool (its ``signal`` / ``wait`` carry the timeout).
@@ -371,35 +380,32 @@ class CeAllGather:
         *,
         slots: int = SLOTS,
     ) -> None:
-        if tp_size < 2 or not 0 <= rank < tp_size:
-            raise ValueError(
-                f"CeAllGather needs tp_size >= 2 and 0 <= rank < tp_size (got {rank}/{tp_size})."
-            )
-        if slots < 1:
-            raise ValueError(f"CeAllGather needs slots >= 1 (got {slots}).")
-        self.pool = pool
-        self.tp_size = tp_size
-        self.rank = rank
-        self.device = device
-        self.slots = slots
         self.push_order: tuple[int, ...] = tuple((rank - i) % tp_size for i in range(1, tp_size))
         """Peers in push order ``me - 1, me - 2, ...``: each consumer's first remote chunk is
         the first one pushed to it (its ``consume_order`` starts at ``me + 1``)."""
         self.consume_order: tuple[int, ...] = tuple((rank + i) % tp_size for i in range(1, tp_size))
-        """Remote sources in the order the GEMMs consume them: ``me + 1, me + 2, ...``."""
-        self._side = torch.cuda.Stream(device=device)
+        """Remote sources in the order the GEMMs consume them, ``me + 1, me + 2, ...``, which is
+        the order their pushes reach this rank (the base's ``arrival_order``)."""
+        super().__init__(
+            pool,
+            tp_size,
+            rank,
+            device,
+            slots=slots,
+            arrival_order=self.consume_order,
+            per_peer_streams=False,  # one side stream for every peer (the measured form)
+        )
         self._layout: list[RegionLayout | None] = [None] * slots
-        self._local_views: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
-        self._peer_views: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
         self._uses = [0] * slots
-        self._in_flight = [False] * slots
-        self._pushed: list[torch.cuda.Event | None] = [None] * slots
         self._local: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * slots
-        self._ready_pending: list[set[int]] = [set() for _ in range(slots)]
-        self._slot_nbytes = 0
-        self._captured = False  # a CUDA graph holds the pool's addresses: no growth after it
+        self._spent = [0] * slots  # consumed credits the open boundary waited (see _release)
 
     # --- channels / capacity --------------------------------------------------------------
+
+    @property
+    def tp_size(self) -> int:
+        """``world_size``, in the TP vocabulary of the op body."""
+        return self.world_size
 
     def _ready_channel(self, slot: int) -> int:
         return slot
@@ -415,11 +421,11 @@ class CeAllGather:
     @property
     def slot_nbytes(self) -> int:
         """Bytes per slot of the current reservation (0 before :meth:`reserve`)."""
-        return self._slot_nbytes
+        return self.pool.slot_nbytes
 
     def covers(self, layout: RegionLayout) -> bool:
         """Whether the current reservation holds ``layout`` on every slot."""
-        return self._slot_nbytes >= layout.slot_nbytes(self.tp_size)
+        return self._covers(layout.slot_nbytes(self.world_size), self.slots)
 
     def reserve(self, layout: RegionLayout) -> bool:
         """Size the pool for ``layout`` on :attr:`slots` slots (collective, grow-only).
@@ -430,72 +436,43 @@ class CeAllGather:
         (re)allocated: the signal pad is then zeroed, so the protocol restarts from "first use"
         and the cached views are dropped.
         """
-        if any(self._in_flight):
-            raise RuntimeError("CeAllGather.reserve with a boundary in flight; call done() first.")
-        if not self.covers(layout):
-            if self._captured:
-                raise RuntimeError(
-                    f"CeAllGather.reserve: the symmetric pool would grow after a CUDA graph "
-                    f"captured its buffers (the pool holds {self._slot_nbytes} bytes per slot, "
-                    f"the layout needs {layout.slot_nbytes(self.tp_size)}); warm up the largest "
-                    "token shape first, or run the warm-up with capture disabled before "
-                    "capturing."
-                )
-            # Drop the views into the current allocation first so the pool can free it before
-            # allocating the larger one (otherwise both are mapped at once).
-            self._drop_views()
-        realloc = self.pool.reserve(layout.slot_nbytes(self.tp_size), self.slots, self.min_channels)
+        realloc = self._reserve(layout.slot_nbytes(self.world_size), self.slots, self.min_channels)
         if realloc:
             self._uses = [0] * self.slots
-            self._drop_views()
-        self._slot_nbytes = self.pool.nbytes // self.pool.slots
-        if self._slot_nbytes // self.tp_size < layout.region_nbytes or self.pool.slots < self.slots:
+        if (
+            self.slot_nbytes // self.world_size < layout.region_nbytes
+            or self.pool.slots < self.slots
+        ):
             raise RuntimeError(
-                f"CeAllGather.reserve: the pool holds {self.pool.slots} x {self._slot_nbytes} "
-                f"bytes after reserve(); need {self.slots} x {layout.slot_nbytes(self.tp_size)}."
+                f"CeAllGather.reserve: the pool holds {self.pool.slots} x {self.slot_nbytes} "
+                f"bytes after reserve(); need {self.slots} x {layout.slot_nbytes(self.world_size)}."
             )
         return realloc
-
-    def _drop_views(self) -> None:
-        # Views into the pool's allocation are valid for one allocation and one slot layout.
-        self._layout = [None] * self.slots
-        self._local_views.clear()
-        self._peer_views.clear()
-
-    def _check_slot(self, slot: int) -> None:
-        if not 0 <= slot < self.slots:
-            raise ValueError(f"slot {slot} out of range (transport has {self.slots} slots).")
 
     def _bind_layout(self, slot: int, layout: RegionLayout) -> None:
         # Region views are valid for the layout a slot was issued with: drop that slot's cache
         # when its layout changes; the other slot (possibly in flight) keeps its own.
         if layout != self._layout[slot]:
             self._layout[slot] = layout
-            for cache in (self._local_views, self._peer_views):
-                for key in [key for key in cache if key[0] == slot]:
-                    del cache[key]
+            self._drop_views(slot)
 
     def _local_region(self, slot: int, src: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Source ``src``'s region in MY slot: what my GEMM reads (cached views)."""
-        key = (slot, src)
-        views = self._local_views.get(key)
-        if views is None:
-            layout = self._layout[slot]
-            region = self.pool.region(slot, src, 0, layout.region_nbytes)
-            views = layout.consumer_views(region)
-            self._local_views[key] = views
-        return views
+        layout = self._layout[slot]
+        return self.view(
+            (slot, "local", src),
+            lambda: layout.consumer_views(self.pool.region(slot, src, 0, layout.region_nbytes)),
+        )
 
     def _peer_region(self, slot: int, peer: int) -> tuple[torch.Tensor, torch.Tensor]:
         """MY region in ``peer``'s slot: what my push writes (cached views)."""
-        key = (slot, peer)
-        views = self._peer_views.get(key)
-        if views is None:
-            layout = self._layout[slot]
-            region = self.pool.peer_region(peer, slot, 0, layout.region_nbytes)
-            views = layout.producer_views(region)
-            self._peer_views[key] = views
-        return views
+        layout = self._layout[slot]
+        return self.view(
+            (slot, "peer", peer),
+            lambda: layout.producer_views(
+                self.pool.peer_region(peer, slot, 0, layout.region_nbytes)
+            ),
+        )
 
     # --- the boundary -----------------------------------------------------------------------
 
@@ -503,7 +480,9 @@ class CeAllGather:
         """Push this rank's rows into every peer's slot ``slot`` and raise the ready flags.
 
         ``x_fp8`` is ``[m, K]`` float8_e4m3fn, ``x_sf`` its ``(m, P)`` int32 packed scales in any
-        stride layout (re-strided with one small copy when not MN-major). Enqueues only.
+        stride layout (re-strided with one small copy when not MN-major). Enqueues only. The
+        host checks come first, so a refusal leaves the slot idle; the boundary is open (the
+        ready flags owed, a capture noted) before the first copy is enqueued.
         """
         self._check_slot(slot)
         if self._in_flight[slot]:
@@ -515,109 +494,81 @@ class CeAllGather:
         layout = RegionLayout(m, k)
         if not self.covers(layout):
             raise RuntimeError(
-                f"CeAllGather.issue: the pool holds {self._slot_nbytes} bytes per slot, a "
-                f"[{m}, {k}] boundary needs {layout.slot_nbytes(self.tp_size)}; reserve() eagerly "
-                "for the largest boundary first."
+                f"CeAllGather.issue: the pool holds {self.slot_nbytes} bytes per slot, a "
+                f"[{m}, {k}] boundary needs {layout.slot_nbytes(self.world_size)}; reserve() "
+                "eagerly for the largest boundary first."
             )
         first_use = self._uses[slot] == 0
-        capturing = torch.cuda.is_current_stream_capturing()
-        if first_use and capturing:
+        if first_use and _is_capturing():
             raise RuntimeError(
                 f"CeAllGather.issue: first use of slot {slot} under CUDA-graph capture (its "
                 f"consumed wait would be missing from every replay); run at least {self.slots} "
                 "eager boundaries after reserving before capturing."
             )
-        if capturing:
-            self._captured = True
         x_fp8 = x_fp8.contiguous()
         x_sf = mn_major_scales(x_sf)
         span = _scale_span(x_sf)
         payload_src = x_fp8.view(torch.uint8).view(-1)
         self._bind_layout(slot, layout)
+        ready, consumed = self._ready_channel(slot), self._consumed_channel(slot)
+        self.open(slot, [(src, ready) for src in self.consume_order])
+        self._local[slot] = (x_fp8, x_sf)
+        self._spent[slot] = 0
         fork = torch.cuda.Event()
         fork.record(torch.cuda.current_stream())
-        side = self._side
-        side.wait_event(fork)
-        with torch.cuda.stream(side):
-            for peer in self.push_order:
+        for i, peer in enumerate(self.push_order):
+            with torch.cuda.stream(self.streams.fork(peer, fork)):
                 if not first_use:
-                    self.pool.wait(peer, self._consumed_channel(slot))
+                    self.pool.wait(peer, consumed)
+                    self._spent[slot] = i + 1
                 payload_dst, span_dst = self._peer_region(slot, peer)
                 payload_dst.copy_(payload_src)
                 span_dst.copy_(span)
-                self.pool.signal(peer, self._ready_channel(slot))
-            pushed = torch.cuda.Event()
-            pushed.record(side)
-        self._pushed[slot] = pushed
-        self._local[slot] = (x_fp8, x_sf)
-        self._ready_pending[slot] = set(self.consume_order)
-        self._in_flight[slot] = True
+                self.mark_pushed(slot, peer, ready)
 
     def chunk(self, src: int, slot: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Source ``src``'s ``(fp8 [m, K], scales (m, P) strided (1, pad4(m)))`` for the GEMM.
 
         The own rank returns the local tensors without a wait; a remote source makes the current
-        stream wait for its ready flag first.
+        stream wait for its ready flag first (once per boundary).
         """
         self._check_slot(slot)
         if not self._in_flight[slot]:
             raise RuntimeError(f"CeAllGather.chunk(slot={slot}) needs an issue({slot}) in flight.")
-        if not 0 <= src < self.tp_size:
-            raise ValueError(f"source rank {src} out of range for tp_size={self.tp_size}.")
+        if not 0 <= src < self.world_size:
+            raise ValueError(f"source rank {src} out of range for tp_size={self.world_size}.")
         if src == self.rank:
             return self._local[slot]
-        if src in self._ready_pending[slot]:
-            self.pool.wait(src, self._ready_channel(slot))
-            self._ready_pending[slot].discard(src)
+        self.wait_ready(slot, src, self._ready_channel(slot))
         return self._local_region(slot, src)
 
     def done(self, slot: int) -> None:
-        """Join the side stream into the current stream and release slot ``slot`` to the peers.
-
-        Call after the last GEMM of the boundary was issued on the current stream.
+        """Complete the boundary on ``slot``: wait the ready flags no chunk consumed, join the
+        side stream into the current stream, release the slot to the peers and note a captured
+        boundary. Call after the last GEMM of the boundary was issued on the current stream.
         """
         self._check_slot(slot)
         if not self._in_flight[slot]:
             raise RuntimeError(f"CeAllGather.done(slot={slot}) without an issue({slot}) in flight.")
-        self._release(slot)
+        super().done(slot)
 
     def _release(self, slot: int) -> None:
-        # One put per wait: consume the ready flags no chunk() waited for before releasing.
-        for src in sorted(self._ready_pending[slot]):
-            self.pool.wait(src, self._ready_channel(slot))
-        self._ready_pending[slot].clear()
-        torch.cuda.current_stream().wait_event(self._pushed[slot])
+        # The base waits every owed ready flag and joins the side stream, from done() and
+        # reset() alike (after a raise inside the push loop, reset() first trims the owed flags
+        # to the pushes that reached this rank). Then the consumed credits, which are the
+        # gather's own as they live across boundaries (put here, waited by the next issue() on
+        # this slot): the credits the loop did not reach are waited now, so that every peer
+        # holds exactly one afterwards, and one is put to every peer -- slot `slot` may be
+        # overwritten. A first use holds no credit.
+        super()._release(slot)
+        consumed = self._consumed_channel(slot)
+        if self._uses[slot]:
+            for peer in self.push_order[self._spent[slot] :]:
+                self.pool.wait(peer, consumed)
         for peer in self.push_order:
-            self.pool.signal(peer, self._consumed_channel(slot))
-        self._pushed[slot] = None
+            self.pool.signal(peer, consumed)
         self._local[slot] = None
-        self._in_flight[slot] = False
         self._uses[slot] += 1
-
-    def drain(self) -> None:
-        """Check that no boundary is in flight; nothing is pending on the side stream after
-        :meth:`done`, so this touches no stream (safe under capture)."""
-        for slot in range(self.slots):
-            if self._in_flight[slot]:
-                raise RuntimeError(f"CeAllGather.drain with a boundary in flight on slot {slot}.")
-
-    def reset(self) -> None:
-        """Recover from a failed boundary: release every slot in flight (consume the ready flags
-        not yet waited, join the side stream, signal consumed), so the next ``begin`` does not
-        raise. Repairs the protocol when every rank failed at the same point; a peer that is
-        already trapped cannot be helped."""
-        for slot in range(self.slots):
-            if self._in_flight[slot]:
-                self._release(slot)
-        torch.cuda.current_stream().wait_stream(self._side)
-
-    def close(self) -> None:
-        """Release the pool (collective by symmetry: every rank must call it)."""
-        self.drain()
-        self._drop_views()
-        self._uses = [0] * self.slots
-        self._slot_nbytes = 0
-        self.pool.release()
 
 
 # =============================================================================
@@ -625,14 +576,14 @@ class CeAllGather:
 # =============================================================================
 
 
-class CeGatherState:
+class CeGatherState(CeState):
     """The copy-engine gather state of one TP group: pool, transport, slot counter, probe verdict.
 
     Created and registered by ``TokenShardedTP`` (two instances over one group, e.g. the two
     Wan2.2 experts, share it), released by ``TokenShardedTP.close()``; a closed state refuses
     :meth:`prepare`. :meth:`prepare` runs eagerly from ``begin()``; the first call probes the
     group's eligibility, rank-agreed, and the verdict decides :attr:`effective` for the state's
-    lifetime.
+    lifetime (:class:`CeState`: probe once, warn once, one registry per protocol).
 
     Args:
         group: The TP process group.
@@ -643,31 +594,14 @@ class CeGatherState:
     def __init__(
         self, group: dist.ProcessGroup, group_name: str, *, timeout_ms: int = DEFAULT_TIMEOUT_MS
     ) -> None:
-        if group is None:
-            raise ValueError("CeGatherState needs a torch.distributed process group; got None.")
-        if timeout_ms < 0:
-            raise ValueError(f"CeGatherState needs timeout_ms >= 0 (got {timeout_ms}).")
-        self.group = group
-        self.group_name = group_name
-        self.timeout_ms = timeout_ms
-        self.tp_size: int = dist.get_world_size(group)
-        self.rank: int = dist.get_rank(group)
+        super().__init__(group, group_name, timeout_ms=timeout_ms)
         self.consumer_ks: set[int] = set()
-        self.effective: bool = False
-        """bool: Whether the copy-engine gather is in use for this group (False before the
-        probe and after a failed one; the TP then keeps the NCCL all-gather)."""
-        self.reason: str = "not probed yet"
-        """str: Why the probe failed, or "" after a successful one."""
-        self.pool: SymmMemPool | None = None
-        self.transport: CeAllGather | None = None
-        self._probed = False
-        self._closed = False
         self._counter = 0
-        self._device = (
-            torch.device("cuda", torch.cuda.current_device())
-            if torch.cuda.is_available()
-            else torch.device("cpu")
-        )
+
+    @property
+    def tp_size(self) -> int:
+        """``world_size``, in the TP vocabulary of the adapters."""
+        return self.world_size
 
     # --- conversion time ------------------------------------------------------------------
 
@@ -690,20 +624,8 @@ class CeGatherState:
         largest noted consumer ``K``, grow-only. Under CUDA-graph capture only the slot counter
         is reset; a probe or an allocation under capture raises, as does a closed state.
         """
-        if self._closed:
-            raise RuntimeError(
-                f"copy-engine gather: the state of TP group {self.group_name!r} is closed "
-                "(TokenShardedTP.close() ran); build a new TokenShardedTP for further forwards."
-            )
-        capturing = torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
-        if not self._probed:
-            if capturing:
-                raise RuntimeError(
-                    "copy-engine gather: the first TokenShardedTP.begin() of a group ran under "
-                    "CUDA-graph capture; run an eager warm-up forward first."
-                )
-            self._probe()
-        if not self.effective:
+        what = f"Token-sharded TP ({self.group_name}): copy-engine all-gather"
+        if not self.probe_once(min_channels=2 * SLOTS, what=what):
             return
         self.begin_forward()
         if not self.consumer_ks:
@@ -711,10 +633,10 @@ class CeGatherState:
         layout = RegionLayout(plan.local_rows, max(self.consumer_ks))
         if self.transport.covers(layout):
             return
-        if capturing:
+        if _is_capturing():
             raise RuntimeError(
                 f"copy-engine gather: TokenShardedTP.begin() under CUDA-graph capture needs a "
-                f"pool for {layout.slot_nbytes(self.tp_size)} bytes per slot, the pool holds "
+                f"pool for {layout.slot_nbytes(self.world_size)} bytes per slot, the pool holds "
                 f"{self.transport.slot_nbytes}; run an eager forward of this shape first."
             )
         self.transport.reserve(layout)  # logs the size, the deadline and the triage hint
@@ -737,61 +659,15 @@ class CeGatherState:
 
     # --- probe --------------------------------------------------------------------------------
 
-    def _probe(self) -> None:
-        # Rank-agreed (D4): >= 2 ranks, a CUDA NCCL group, a working tiny rendezvous and enough
-        # signal channels; the reason names the declining ranks.
-        ok, reason = probe_symmetric_memory(self.group, self._device, min_channels=2 * SLOTS)
-        if ok:
-            self.pool = SymmMemPool(self.group, self._device, self.timeout_ms, align=DEFAULT_ALIGN)
-            self.transport = CeAllGather(self.pool, self.tp_size, self.rank, self._device)
-        else:
-            logger.warning(
-                f"Token-sharded TP ({self.group_name}): copy-engine all-gather unavailable "
-                f"({reason}); keeping the NCCL all-gather."
-            )
-        self.effective = ok
-        self.reason = reason
-        self._probed = True
-
-    # --- teardown -----------------------------------------------------------------------------
-
-    def close(self) -> None:
-        """Release the pool and unregister (idempotent; collective by symmetry when a pool
-        exists). Call on every rank before the process group is destroyed. The state is then
-        closed: not effective, and :meth:`prepare` raises (a sibling ``TokenShardedTP`` that
-        still holds it gets a clear error rather than a silent fallback)."""
-        if self.transport is not None:
-            self.transport.close()
-        self.transport = None
-        self.pool = None
-        self.effective = False
-        self.reason = "closed"
-        self._closed = True
-        if _STATES.get(self.group_name) is self:
-            del _STATES[self.group_name]
+    def _make_transport(self) -> None:
+        self.pool = SymmMemPool(self.group, self._device, self.timeout_ms, align=DEFAULT_ALIGN)
+        self.transport = CeAllGather(self.pool, self.world_size, self.rank, self._device)
 
 
-_STATES: dict[str, CeGatherState] = {}
-
-
-def get_state(group_name: str) -> CeGatherState:
-    """The registered state of ``group_name``; raises ``KeyError`` when there is none."""
-    state = _STATES.get(group_name)
-    if state is None:
-        raise KeyError(group_name)
-    return state
-
-
-def register_state(state: CeGatherState) -> CeGatherState:
-    """Register ``state`` for its group name, or return the one already registered for it."""
-    return _STATES.setdefault(state.group_name, state)
-
-
-def release_state(group_name: str) -> None:
-    """Close and unregister the state of ``group_name`` (no-op when there is none)."""
-    state = _STATES.get(group_name)
-    if state is not None:
-        state.close()
+# The registry of this protocol, as TokenShardedTP and the op body call it.
+get_state = CeGatherState.get
+register_state = CeGatherState.register
+release_state = CeGatherState.release
 
 
 # =============================================================================
@@ -892,6 +768,13 @@ def ce_gather_gemm_impl(
             a_fp8, a_sf = transport.chunk(src, slot)
             fp8_block_gemm_out(a_fp8, a_sf, w_fp8, w_sf, out[src * m : (src + 1) * m])
         transport.done(slot)
+    except CeResyncError as exc:
+        # The resync after a failed boundary found the ranks disagreeing on their boundary count
+        # (raised by ``open`` before anything was enqueued): take the group off the copy-engine
+        # gather for the state's lifetime (one warning) and propagate; the adapters' next call
+        # reads ``effective`` and gathers with NCCL.
+        state.disable(str(exc))
+        raise
     except Exception:
         transport.reset()
         raise
