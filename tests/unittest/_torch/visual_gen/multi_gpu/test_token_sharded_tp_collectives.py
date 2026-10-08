@@ -1600,7 +1600,7 @@ def _logic_ce_reduce_scatter_op(rank, world_size, device):
     def boundary(row, k_local, plan, seed, with_bias):
         """One boundary on this rank's ``[B, S, K_local]`` slice: the quantized padded input,
         the raw GEMM partial, PR #9's partial (bias on rank 0 when ``with_bias``) and the fused
-        op's ``[m, N]`` output (the op takes the bias on rank 0 only)."""
+        op's ``[m, N]`` output (the op takes the bias on every rank and adds it to source 0)."""
         b, s = plan.batch_size, plan.seq_len
         x = (torch.randn(b, s, k_local, generator=torch.Generator().manual_seed(seed)) * 2).to(
             device, torch.bfloat16
@@ -1610,7 +1610,7 @@ def _logic_ce_reduce_scatter_op(rank, world_size, device):
             fp8, sf, row.weight, row.weight_scale, torch.bfloat16, True
         )
         pr9 = raw + row.bias if with_bias and rank == 0 else raw
-        c5 = op(fp8, sf, row, row.bias if with_bias and rank == 0 else None, plan)
+        c5 = op(fp8, sf, row, row.bias if with_bias else None, plan)  # every rank passes the bias
         return fp8, sf, raw, pr9, c5
 
     shapes = _FP8_SHAPES + [(1, 18900 * world_size)] + ([(2, 37800)] if world_size == 2 else [])
