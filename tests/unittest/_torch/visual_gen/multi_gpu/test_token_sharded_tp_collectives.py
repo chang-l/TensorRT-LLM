@@ -1876,23 +1876,27 @@ def _logic_adapters_ce_reduce_scatter(rank, world_size, device):
         )
         # The NCCL adapters' own partials (rank 0's with the bias): the row Linear's GEMM on the
         # padded input, the MLP's down_proj output on the real rows, padded as the adapter does.
+        # Only the real rows are compared: pad rows are dropped at the next gather by contract,
+        # and their content differs by construction (the fused op leaves rank 0's bias in them,
+        # as the NCCL row path does; the NCCL MLP path appends zero rows after its bias).
         row_partial = Linear.forward(row_ref, tp_ref.pad_row_input(x_row))
         down_partial = tp_ref.pad_row_input(down_partials[-1])
         m = plan.local_rows
+        real = _real_row_mask(plan, device)
         for what, got, ref, partial in (
             ("row adapter", y_ce, y_ref, row_partial),
             ("MLP adapter", f_ce, f_ref, down_partial),
         ):
             parts = _rs_partials(partial, plan, tp_ref.group)
-            got2, ref2 = got.reshape(m, -1), ref.reshape(m, -1)
-            chain = rs.reference_fixed_order_reduce(list(parts.unbind(0)), None)
+            got2, ref2 = got.reshape(m, -1)[real], ref.reshape(m, -1)[real]
+            chain = rs.reference_fixed_order_reduce(list(parts.unbind(0)), None)[real]
             _check(
                 torch.equal(got2, chain),
                 f"{what} {(b, s)}: copy-engine RS != the fixed-order chain over the NCCL "
                 f"adapter's partials ({(got2 != chain).sum().item()} of {chain.numel()} differ)",
                 device,
             )
-            _check_rs_vs_nccl(got2, ref2, parts, device, f"{what} {(b, s)}")
+            _check_rs_vs_nccl(got2, ref2, parts[:, real], device, f"{what} {(b, s)}")
         rule = (
             tp_ce.uses_ce_reduce_scatter(row_ce, x_row)
             and tp_ce.uses_ce_reduce_scatter(mlp_ce.down_proj, x_row)

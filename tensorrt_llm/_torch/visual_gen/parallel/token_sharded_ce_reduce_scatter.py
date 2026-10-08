@@ -1148,7 +1148,9 @@ def ce_gemm_reduce_scatter_impl(
         tp_size: Ranks in the group.
         batch_size: ``B``.
         seq_len: ``S`` (not used by the body: the output keeps the pad rows, as the NCCL
-            reduce-scatter's does; part of the plan ints the graph specializes on).
+            reduce-scatter's does; part of the plan ints the graph specializes on). A pad row of
+            the output holds the bias (rank 0's bias enters source 0's block for every row, as it
+            does on the NCCL row path); pad rows are dropped at the next gather by contract.
         padded_seq_len: ``S_pad``.
     """
     del seq_len
