@@ -1896,9 +1896,11 @@ def _logic_adapters_ce_reduce_scatter(rank, world_size, device):
         ):
             parts = _rs_partials(partial, plan, tp_ref.group)
             got2, ref2 = got.reshape(m, -1)[real], ref.reshape(m, -1)[real]
-            if (
-                got2.numel() == 0
-            ):  # every row of this rank is padding (e.g. (1, 5) at tp 4): nothing to compare
+            if got2.numel() == 0:
+                # Every row of this rank is padding (e.g. (1, 5) at tp 4): nothing to compare, but
+                # _check is collective, so take part in the two checks the other ranks run.
+                _check(True, f"{what} {(b, s)}: no real rows on this rank", device)
+                _check(True, f"{what} {(b, s)}: no real rows on this rank", device)
                 continue
             chain = rs.reference_fixed_order_reduce(list(parts.unbind(0)), None)[real]
             _check(
