@@ -86,7 +86,7 @@ activation row in one block-ordered K loop; the scales of a block are re-strided
 copy, :func:`token_sharded_ce_gather.mn_major_scales`). The reduce computes, for every element,
 ``out = bf16(((p_0' + p_1) + p_2) + ... + p_{tp-1})`` with every partial upcast to fp32, the
 adds in source-rank order ``0 .. tp - 1`` whatever arrived first, and ``p_0' = bf16(p_0 + bias)``
-when the row Linear's bias is given (the bias of ``tp_rank`` 0 only, added in bf16 to source 0's
+when the row Linear's bias is given (passed on every rank -- each destination adds it once to source 0's
 partial exactly where the NCCL path's rank-0 Linear adds it), else ``p_0``. No atomics, no
 accumulate-as-they-land: :func:`reference_fixed_order_reduce` (the plain torch chain) reproduces
 it bitwise, which is what the tests assert. It is the precision class of NCCL's NVLS
@@ -291,7 +291,8 @@ def reference_fixed_order_reduce(
     """The reduce's contract as the plain torch chain: ``bf16((((p_0' + p_1) + p_2) + ...))``.
 
     Every partial is upcast to fp32 and added in source order; ``p_0' = bf16(p_0 + bias)`` when
-    ``bias`` is given (source 0 carries the bias, as the NCCL path's rank-0 Linear does), else
+    ``bias`` is given (source 0 carries the bias, as the NCCL path's rank-0 partial does; every
+    destination passes its copy of the bias), else
     ``p_0``; one bf16 rounding at the end. IEEE fp32 adds and RNE casts, so
     :func:`fixed_order_reduce_bf16` reproduces it bitwise. CPU-testable; several launches and
     fp32 intermediates, so it is the reference and the fallback, not the hot path.
