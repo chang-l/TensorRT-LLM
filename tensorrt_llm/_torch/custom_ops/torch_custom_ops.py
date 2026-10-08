@@ -2290,6 +2290,64 @@ def _(
                                 dtype=output_dtype)
 
 
+@torch.library.custom_op("trtllm::token_sharded_fp8_ce_gather_gemm",
+                         mutates_args=())
+def token_sharded_fp8_ce_gather_gemm(
+    x_fp8: torch.Tensor,
+    x_sf: torch.Tensor,
+    w_fp8: torch.Tensor,
+    w_sf: torch.Tensor,
+    group_name: str,
+    tp_rank: int,
+    tp_size: int,
+    batch_size: int,
+    seq_len: int,
+    padded_seq_len: int,
+) -> torch.Tensor:
+    """Token-sharded TP: copy-engine all-gather of this rank's FP8 block-scale
+    rows fused with the consumer's DeepGEMM, one GEMM per source rank.
+
+    ``x_fp8`` ``[m, K]`` float8_e4m3fn and ``x_sf`` ``[m, P]`` int32 packed
+    UE8M0 scales are this rank's quantized rows (``m = batch_size *
+    padded_seq_len / tp_size``), ``w_fp8`` / ``w_sf`` the consumer Linear's
+    weight and packed weight scale. Returns ``[batch_size * seq_len, N]``
+    bf16: the GEMM output of every rank's real rows (pad rows dropped), the
+    same bytes ``trtllm::fp8_prequantized_swap_ab_gemm`` produces on the
+    NCCL-gathered input; the bias is added by the caller.
+
+    Hidden side effects (the op is registered without mutated args so a
+    compiled block stays one graph): it pushes the rows into every peer's
+    region of the TP group's symmetric-memory pool and runs signal kernels;
+    the slot protocol relies on every rank calling it in the same order.
+    The data dependency through the block orders consecutive boundaries and
+    the output is always consumed, so Inductor neither reorders nor drops
+    a call. ``group_name`` is the TP group's c10d name, identical for every
+    block, and the plan ints are the ones the graph already specializes on.
+    """
+    from tensorrt_llm._torch.visual_gen.parallel.token_sharded_ce_gather import \
+        ce_gather_gemm_impl
+    return ce_gather_gemm_impl(x_fp8, x_sf, w_fp8, w_sf, group_name, tp_rank,
+                               tp_size, batch_size, seq_len, padded_seq_len)
+
+
+@token_sharded_fp8_ce_gather_gemm.register_fake
+def _(
+    x_fp8: torch.Tensor,
+    x_sf: torch.Tensor,
+    w_fp8: torch.Tensor,
+    w_sf: torch.Tensor,
+    group_name: str,
+    tp_rank: int,
+    tp_size: int,
+    batch_size: int,
+    seq_len: int,
+    padded_seq_len: int,
+) -> torch.Tensor:
+    del x_sf, w_sf, group_name, tp_rank, tp_size, padded_seq_len
+    return x_fp8.new_empty((batch_size * seq_len, w_fp8.shape[0]),
+                           dtype=torch.bfloat16)
+
+
 @torch.library.custom_op("trtllm::fp8_swap_ab_gemm", mutates_args=())
 def fp8_swap_ab_gemm(
     input: torch.Tensor,
