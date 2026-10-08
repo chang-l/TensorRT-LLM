@@ -62,7 +62,12 @@ from tensorrt_llm.logger import logger
 from tensorrt_llm.math_utils import pad_up
 from tensorrt_llm.quantization.utils.fp4_utils import NVFP4_SF_VEC_SIZE
 
-from ...modules.linear import FP8BlockScalesLinearMethod, Linear, is_static_nvfp4_input_eligible
+from ...modules.linear import (
+    FP8BlockScalesLinearMethod,
+    Linear,
+    TensorParallelMode,
+    is_static_nvfp4_input_eligible,
+)
 from ...utils import Fp4QuantizedTensor, compute_swizzled_sf_shape
 from ..utils import SequenceSharder
 
@@ -906,14 +911,17 @@ class TokenShardedTP:
     ) -> bool:
         """Whether a column projection's call runs the fused copy-engine gather + GEMM.
 
-        True iff the effective mode is ``"copy_engine"``, ``consumer`` takes a pre-quantized
-        FP8 block-scale input (:func:`fp8_block_scale_prequant_ok`), no LoRA is active
-        (``lora_params`` falsy; an active LoRA needs the dense input) and ``act`` is bf16 or
-        already an :class:`Fp8BlockScaledActivation`. Anything else (NVFP4, bf16 consumers)
-        takes :meth:`gather_input` as in the NCCL mode. Decided per call: the quant method
-        is final only after loading.
+        True iff the effective mode is ``"copy_engine"``, ``consumer`` is a column-parallel
+        :class:`Linear` that takes a pre-quantized FP8 block-scale input
+        (:func:`fp8_block_scale_prequant_ok`), no LoRA is active (``lora_params`` falsy; an
+        active LoRA needs the dense input) and ``act`` is bf16 or already an
+        :class:`Fp8BlockScaledActivation`. Anything else (NVFP4, bf16 consumers, a row
+        projection) takes :meth:`gather_input` as in the NCCL mode. Decided per call: the
+        quant method is final only after loading.
         """
         if self.effective_gather_mode != "copy_engine" or lora_params:
+            return False
+        if not isinstance(consumer, Linear) or consumer.tp_mode != TensorParallelMode.COLUMN:
             return False
         if not fp8_block_scale_prequant_ok(consumer):
             return False
