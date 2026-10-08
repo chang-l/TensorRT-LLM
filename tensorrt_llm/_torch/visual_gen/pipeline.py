@@ -911,9 +911,9 @@ class BasePipeline(nn.Module):
     def _needs_eager_warmup_pass(self) -> bool:
         """Whether every warm-up shape must run eagerly before any CUDA graph is captured.
 
-        A token-sharded TP with the copy-engine gather sizes its grow-only symmetric pool
-        from the forwards, and a pool that grows after a capture would leave that graph
-        with stale buffers (``TokenShardedSequenceSharder.needs_eager_warmup``).
+        A token-sharded TP with the copy-engine gather or reduce-scatter sizes its grow-only
+        symmetric pools from the forwards, and a pool that grows after a capture would leave
+        that graph with stale buffers (``TokenShardedSequenceSharder.needs_eager_warmup``).
         """
         if not self.pipeline_config.cuda_graph.enable:
             return False
