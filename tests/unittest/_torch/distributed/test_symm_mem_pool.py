@@ -19,6 +19,7 @@ port). The GPU protocol (rendezvous, peer views, signals) is covered by the toke
 multi-GPU tests that use the pool.
 """
 
+import contextlib
 import time
 from datetime import timedelta
 from types import SimpleNamespace
@@ -445,3 +446,227 @@ def test_check_addressing_one_rank_fails_locally_both_ranks_agree(tmp_path, phas
         assert time.monotonic() < deadline, (
             "the two-rank addressing check did not finish within 180 s"
         )
+
+
+# =============================================================================
+# Pool additions for the copy-engine protocols: live-pad precondition, pad accessor, signal_write
+# =============================================================================
+
+
+class _FakeHandle:
+    """What ``_allocate`` and the signal paths read from a ``_SymmetricMemory`` handle, on CPU
+    tensors: one uint8 pad per rank, ``signal_pad_ptrs`` their addresses."""
+
+    def __init__(self, rank: int, world_size: int, buf: torch.Tensor, pads: list[torch.Tensor]):
+        self.rank, self.world_size = rank, world_size
+        self.offset, self.buffer_size = 0, buf.numel()
+        self.pads = pads
+        self.signal_pad_size = pads[0].numel()
+        self.signal_pad_ptrs = [pad.data_ptr() for pad in pads]
+
+    def get_signal_pad(self, rank, sizes=(), dtype=None, storage_offset=0):
+        words = self.pads[rank].view(dtype)
+        return words[storage_offset : storage_offset + sizes[0]]
+
+
+class _FakeSymmMem:
+    """Stand-in for ``torch.distributed._symmetric_memory``: ``empty`` + ``rendezvous`` on CPU
+    tensors, every rendezvous with its own pads or (``shared_pad``) all of them with one set, as
+    an allocator that splits a segment would hand out; ``_SymmetricMemory.memset32`` records."""
+
+    def __init__(self, *, pad_nbytes: int = 9216) -> None:
+        self.rank, self.world_size, self.pad_nbytes = 0, 1, pad_nbytes
+        self.shared_pad = False
+        self._shared: list[torch.Tensor] | None = None
+        self.handles: list[_FakeHandle] = []
+        self.memsets: list[tuple] = []
+        fake = self
+
+        class _SymmetricMemory:
+            @staticmethod
+            def memset32(input, offset, val, count=1):
+                fake.memsets.append((input.data_ptr(), input.dtype, offset, val, count))
+
+        self._SymmetricMemory = _SymmetricMemory
+
+    def _pads(self) -> list[torch.Tensor]:
+        fresh = [torch.zeros(self.pad_nbytes, dtype=torch.uint8) for _ in range(self.world_size)]
+        if not self.shared_pad:
+            return fresh
+        if self._shared is None:
+            self._shared = fresh
+        return self._shared
+
+    def empty(self, nbytes, *, dtype, device):
+        return torch.zeros(nbytes, dtype=dtype)
+
+    def rendezvous(self, buf, group):
+        handle = _FakeHandle(self.rank, self.world_size, buf, self._pads())
+        self.handles.append(handle)
+        return handle
+
+    def get_backend(self, device):
+        return "FAKE"
+
+
+@pytest.fixture
+def fake_symm(gloo_world, monkeypatch):
+    """Preconditions and device syncs stubbed, the symmetric-memory module replaced by the CPU
+    fake, the live-pad registry fresh: ``_allocate`` itself runs on the one-rank gloo group."""
+    fake = _FakeSymmMem()
+    monkeypatch.setattr(symm_mem_pool, "_symm_mem", lambda: fake)
+    monkeypatch.setattr(symm_mem_pool, "_local_preconditions", lambda group, device: [])
+    monkeypatch.setattr(symm_mem_pool.torch.cuda, "synchronize", lambda device=None: None)
+    monkeypatch.setattr(symm_mem_pool, "_live_pads", {})
+    return fake
+
+
+def test_allocate_registers_the_live_pad_and_free_removes_it(gloo_world, fake_symm):
+    pool = SymmMemPool(gloo_world, "cpu")
+    assert pool.signal_pad_ptrs == ()
+    with pytest.raises(RuntimeError, match=r"reserve\(\) first"):
+        pool.local_signal_pad()
+    assert pool.reserve(4096, slots=2, min_channels=4) is True
+    handle = fake_symm.handles[-1]
+    pad_ptr = handle.signal_pad_ptrs[0]
+    assert pool.signal_pad_ptrs == (pad_ptr,)
+    assert symm_mem_pool._live_pads == {pad_ptr: repr(pool)}
+    assert f"pad={pad_ptr:#x}" in repr(pool)
+    # The accessor is this rank's data-channel words: int32, channels x world_size of them, at
+    # the pad, sharing its memory; the pad was zeroed by the allocation.
+    view = pool.local_signal_pad()
+    assert view.dtype == torch.int32 and view.shape == (pool.channels * pool.world_size,)
+    assert view.data_ptr() == pad_ptr and pool.channels == 9216 // 4 - 1
+    assert not view.any()
+    handle.pads[0].view(torch.int32)[5] = 1
+    assert view[5] == 1
+    pool.release()
+    assert symm_mem_pool._live_pads == {} and pool.signal_pad_ptrs == ()
+    pool.release()  # idempotent, nothing left to unregister
+
+
+def test_second_pool_on_a_live_pad_is_refused_before_its_flags_are_zeroed(gloo_world, fake_symm):
+    fake_symm.shared_pad = True
+    first = SymmMemPool(gloo_world, "cpu", timeout_ms=1234)
+    assert first.reserve(4096) is True
+    pad_words = fake_symm.handles[-1].pads[0].view(torch.int32)
+    pad_words[7] = 1  # a live flag of the first pool (a TP pool idles with its consumed flag set)
+    second = SymmMemPool(gloo_world, "cpu")
+    with pytest.raises(
+        RuntimeError, match=r"signal pad at 0x[0-9a-f]+ .* is live under SymmMemPool\("
+    ) as info:
+        second.reserve(4096)
+    assert "timeout_ms=1234" in str(info.value)  # the holder is named
+    assert "set_signal_pad_size" in str(info.value) and "no_split" in str(info.value)
+    assert not second.reserved and second.signal_pad_ptrs == ()
+    assert pad_words[7] == 1  # the holder's flag survived: nothing was zeroed
+    assert list(symm_mem_pool._live_pads) == [first.signal_pad_ptrs[0]]
+    # The probe's tiny rendezvous lands on the same pad and declines with the reason.
+    ok, reason = probe_symmetric_memory(gloo_world, "cpu")
+    assert ok is False
+    assert "tiny symmetric rendezvous failed: RuntimeError" in reason and "is live under" in reason
+    assert pad_words[7] == 1 and list(symm_mem_pool._live_pads) == [first.signal_pad_ptrs[0]]
+    # Releasing the holder frees the pad: the probe passes and the second pool reserves on it.
+    first.release()
+    assert symm_mem_pool._live_pads == {}
+    assert probe_symmetric_memory(gloo_world, "cpu") == (True, "")
+    assert symm_mem_pool._live_pads == {}  # the probe released its own allocation
+    assert second.reserve(4096) is True
+    assert symm_mem_pool._live_pads == {second.signal_pad_ptrs[0]: repr(second)}
+    assert pad_words[7] == 0  # zeroed by the new holder, as every allocation does
+    second.release()
+    assert symm_mem_pool._live_pads == {}
+
+
+@pytest.fixture
+def four_rank_pool(gloo_world, fake_symm):
+    """A reserved pool that believes it is rank 2 of 4 (the gloo group has one rank; the fake
+    handle carries four pads), so the flag-word arithmetic is checked off the trivial case."""
+    pool = SymmMemPool(gloo_world, "cpu")
+    pool.rank, pool.world_size = 2, 4
+    fake_symm.rank, fake_symm.world_size = 2, 4
+    pool._allocate(PoolLayout(4, 1, 256))
+    assert pool.channels == 9216 // 16 - 1 and len(pool.signal_pad_ptrs) == 4
+    return pool
+
+
+def test_local_signal_pad_is_this_ranks_data_channel_words(four_rank_pool):
+    pool = four_rank_pool
+    view = pool.local_signal_pad()
+    assert view.dtype == torch.int32 and view.shape == (pool.channels * 4,)
+    assert view.data_ptr() == pool.signal_pad_ptrs[2]
+    assert len(set(pool.signal_pad_ptrs)) == 4  # one pad per rank, as mapped into this process
+
+
+def test_signal_write_eager_is_one_stream_memory_write_of_the_put_word(
+    four_rank_pool, fake_symm, monkeypatch
+):
+    pool = four_rank_pool
+    writes: list[tuple] = []
+    result = [0]
+
+    def cu_stream_write_value32(stream, addr, value, flags):
+        writes.append((stream, addr, value, flags))
+        return (result[0],)
+
+    monkeypatch.setattr(
+        symm_mem_pool,
+        "_cuda_driver",
+        lambda: SimpleNamespace(cuStreamWriteValue32=cu_stream_write_value32),
+    )
+    monkeypatch.setattr(symm_mem_pool, "_is_capturing", lambda: False)
+
+    def no_switch(stream):
+        raise AssertionError("the eager path must not switch streams")
+
+    monkeypatch.setattr(symm_mem_pool.torch.cuda, "stream", no_switch)
+    stream = SimpleNamespace(cuda_stream=0x1234)
+    pool.signal_write(3, 5, stream)
+    word = 4 * 5 + 2  # world_size * channel + rank: the word put_signal would write
+    assert writes == [(0x1234, pool.signal_pad_ptrs[3] + 4 * word, 1, 0)]
+    assert fake_symm.memsets == []
+    # Checks run before any write.
+    with pytest.raises(ValueError, match="rank 4 out of range"):
+        pool.signal_write(4, 0, stream)
+    with pytest.raises(ValueError, match="channel .* out of range"):
+        pool.signal_write(0, pool.channels, stream)
+    assert len(writes) == 1
+    # A driver error is raised with its code, never swallowed.
+    result[0] = 1
+    with pytest.raises(RuntimeError, match=r"cuStreamWriteValue32 failed \(1; peer 0, channel 0"):
+        pool.signal_write(0, 0, stream)
+    pool._free(fence=False)
+    with pytest.raises(RuntimeError, match=r"reserve\(\) first"):
+        pool.signal_write(0, 0, stream)
+
+
+def test_signal_write_under_capture_is_a_memset_node_on_the_forked_stream(
+    four_rank_pool, fake_symm, monkeypatch
+):
+    pool = four_rank_pool
+
+    def no_driver():
+        raise AssertionError("the capture path must not call the driver")
+
+    monkeypatch.setattr(symm_mem_pool, "_cuda_driver", no_driver)
+    entered: list = []
+
+    @contextlib.contextmanager
+    def fake_stream_context(stream):
+        entered.append(stream)
+        yield
+
+    monkeypatch.setattr(symm_mem_pool.torch.cuda, "stream", fake_stream_context)
+    capturing = iter([True, True])  # the current stream captures, and so does the forked one
+    monkeypatch.setattr(symm_mem_pool, "_is_capturing", lambda: next(capturing))
+    stream = SimpleNamespace(cuda_stream=0x1234)
+    pool.signal_write(1, 7, stream)
+    word = 4 * 7 + 2
+    assert entered == [stream]
+    assert fake_symm.memsets == [(pool.signal_pad_ptrs[1], torch.uint32, word, 1, 1)]
+    assert pool._peer_signal_pad(1) is pool._peer_signal_pad(1)  # cached per allocation
+    # A stream outside the capture is refused instead of writing the flag at capture time.
+    capturing = iter([True, False])
+    with pytest.raises(RuntimeError, match="outside the capture"):
+        pool.signal_write(1, 7, stream)
+    assert len(fake_symm.memsets) == 1 and entered == [stream, stream]

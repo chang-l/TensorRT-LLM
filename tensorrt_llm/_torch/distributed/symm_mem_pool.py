@@ -56,13 +56,30 @@ Rules
   ``(channel, src -> me)`` is set, then clears it. One put per wait. Channels
   ``0 .. channels - 1`` belong to the caller; the pad's last channel is reserved for
   :meth:`SymmMemPool.barrier`. Two protocols on one pool must use disjoint channels.
+  :meth:`SymmMemPool.signal_write` sets the same flag without an SM (a stream memory operation
+  when eager, a memset node under CUDA-graph capture) and without the put's back-pressure: a
+  put on a still-set flag is lost and the pair's next wait spins to the deadline one boundary
+  later. A protocol's own wait kernel over :meth:`SymmMemPool.local_signal_pad` (word
+  ``world_size * channel + src``) must keep ``wait_signal``'s consume semantics: acquire
+  compare-and-swap 1 -> 0 at system scope, trap at the deadline. The peer-pad write of
+  ``signal_write`` (an address of another rank's pad mapped into this process) has no CPU
+  model; the method's docstring names the two-rank device check it needs.
 * Signal pad: the pool zeroes this rank's pad on every allocation, fenced before any peer can
   signal, so a protocol may start from "no flag set" after each :meth:`SymmMemPool.reserve`
-  that reallocated. ``symm_mem.empty`` sub-allocates from torch's implicit symmetric memory
-  pool, whose segments (and their pads) are cached and re-handed out, so a pad is only known
-  zero because the pool clears it; it is shared with any other ``symm_mem`` tensor that lands
-  in the same segment, so the pool's channels are exclusive only while it is the process's sole
-  symmetric-memory user.
+  that reallocated. ``symm_mem.empty`` sub-allocates from torch's symmetric memory pool, whose
+  segments (and their pads) are cached and re-handed out, so a pad is only known zero because
+  the pool clears it. A pad shared with another LIVE allocation would be cleared under that
+  allocation's flags (the token-sharded TP gather and reduce-scatter pools of one process idle
+  between boundaries with flags set), so the pool refuses it: the pad address of every live pool
+  allocation of the process is kept in a module-level registry, and a second allocation on a
+  live pad is refused before anything is zeroed: :meth:`SymmMemPool.reserve` raises and
+  :func:`probe_symmetric_memory` declines, each after agreeing the verdict across the group
+  (the registry is process-local, like the pad size), so every rank takes the same side.
+  torch's allocator gives every ``symm_mem.empty`` its own segment and pad
+  (``MemPool(no_split=True)``, torch 2.13 ``torch/distributed/_symmetric_memory/__init__.py:
+  2138-2150``), so only an allocator that splits segments arms the check; it sees pools only,
+  not the process's other symmetric-memory users (the async-Ulysses op's per-slot buffers,
+  ``symm_mem_allreduce.py``), which have their own segments on that allocator.
 * Timeouts: a wait that exceeds ``timeout_ms`` is a device-side trap (PyTorch's signal kernels
   ``__trap()``: the CUDA context is lost and the process must exit). The spin starts when the GPU
   reaches the wait, so host-side skew between ranks (a recompile, a JIT, a collective) counts
@@ -108,6 +125,12 @@ _TIMEOUT_TRIAGE_HINT = (
     "rank raised between its push and its consumed signal: read that rank's traceback"
 )
 
+_live_pads: dict[int, str] = {}
+"""Address of this rank's signal pad -> the pool holding it, for every live allocation of the
+process (the live-pad precondition of :meth:`SymmMemPool._allocate`; cleared by its free)."""
+
+_driver: ModuleType | None = None
+
 
 def _symm_mem() -> ModuleType:
     # Imported lazily so this module (and its probe) loads on a torch build without the symmetric
@@ -115,6 +138,17 @@ def _symm_mem() -> ModuleType:
     import torch.distributed._symmetric_memory as symm_mem
 
     return symm_mem
+
+
+def _cuda_driver() -> ModuleType:
+    # cuda-python's driver module (requirements.txt pins cuda-python >= 13), imported at the
+    # first SM-free signal so the pool and its probe load without it.
+    global _driver
+    if _driver is None:
+        from cuda.bindings import driver
+
+        _driver = driver
+    return _driver
 
 
 def _is_capturing() -> bool:
@@ -341,6 +375,8 @@ class SymmMemPool:
         self._handle = None  # torch._C._distributed_c10d._SymmetricMemory
         self._base_offset: int = 0  # bytes from the symmetric block base to the pool tensor
         self._peer_buffers: dict[int, torch.Tensor] = {}
+        self._pad_ptrs: tuple[int, ...] = ()  # every rank's signal pad address, as mapped here
+        self._peer_pads: dict[int, torch.Tensor] = {}  # uint32 views of the peers' pads
 
     # --- state ------------------------------------------------------------------------------
 
@@ -392,10 +428,20 @@ class SymmMemPool:
     def barrier_channel(self) -> int:
         return self.signal_channels - 1
 
+    @property
+    def signal_pad_ptrs(self) -> tuple[int, ...]:
+        """Device address of every rank's signal pad as mapped into this process, by rank
+        (``handle.signal_pad_ptrs``; ``()`` before :meth:`reserve`). Word ``world_size * channel
+        + src`` of rank ``dst``'s pad is flag ``(channel, src -> dst)``."""
+        return self._pad_ptrs
+
+    def _pad_hex(self) -> str:
+        return f"{self._pad_ptrs[self.rank]:#x}" if self._pad_ptrs else "unknown"
+
     def __repr__(self) -> str:
         state = (
             f"layout={self._layout} offset={self._base_offset} channels={self.channels} "
-            f"generation={self.generation}"
+            f"generation={self.generation} pad={self._pad_hex()}"
             if self.reserved
             else "unreserved"
         )
@@ -428,7 +474,8 @@ class SymmMemPool:
 
         Raises:
             RuntimeError: Under CUDA-graph capture, on an unsupported group or device, when the
-                signal pad is too small or when the addressing check fails.
+                allocation fails on any rank (the live-pad refusal among them), when the signal
+                pad is too small or when the addressing check fails.
             ValueError: On a non-positive request or when the ranks disagree on the alignment.
         """
         if _is_capturing():
@@ -467,7 +514,21 @@ class SymmMemPool:
                 return False
             agreed = self._layout.merged(agreed)
             self._free(fence=True)
-        self._allocate(agreed)
+        # The allocation's own failures (the live-pad refusal, the block-size check, the
+        # rendezvous) are process-local, so the verdict is agreed before any rank raises, as for
+        # the two checks below: a rank raising alone would leave its peers in the next
+        # collective. A rank whose allocation succeeded unmaps it without the fence (nothing was
+        # written; the failing rank has no allocation to fence with).
+        detail = ""
+        try:
+            self._allocate(agreed)
+        except (RuntimeError, OSError, ValueError) as e:
+            detail = f"allocation failed: {type(e).__name__}: {e}"
+        ok, reason = _agree(self.group, not detail, detail)
+        if not ok:
+            if self.reserved:
+                self._free(fence=False)
+            raise RuntimeError(f"SymmMemPool: {reason}")
         # Both failures below are agreed across ranks (the pad size and the merged request are
         # the same everywhere), so every rank reaches the fenced free together. Without it the
         # bad allocation would stay reserved and a retried, covered request would return False
@@ -488,13 +549,20 @@ class SymmMemPool:
             f"{agreed.world_size} regions x {agreed.region_nbytes} B = "
             f"{agreed.nbytes / 2**30:.3f} GiB of symmetric memory per rank (backend "
             f"{_symm_mem().get_backend(self.device)}, block offset {self._base_offset}, "
-            f"{self.channels} data signal channels, signal deadline {self.timeout_ms} ms; "
+            f"signal pad {self._pad_hex()} with {self.channels} data channels, "
+            f"signal deadline {self.timeout_ms} ms; "
             f"{_TIMEOUT_TRIAGE_HINT})."
         )
         return True
 
     def _allocate(self, layout: PoolLayout) -> None:
-        """Allocate and rendezvous ``layout`` (collective through ``rendezvous``); no fence."""
+        """Allocate and rendezvous ``layout`` (collective through ``rendezvous``); no fence.
+
+        Refuses an allocation whose signal pad is live under another pool of this process
+        (module docstring) before anything is stored or zeroed. The verdict is process-local
+        (the registry sees this process's pools only), so :meth:`reserve` and the probe agree
+        it across the group before raising or declining.
+        """
         symm_mem = _symm_mem()
         buf = symm_mem.empty(layout.nbytes, dtype=torch.uint8, device=self.device)
         handle = symm_mem.rendezvous(buf, self.group)
@@ -514,9 +582,23 @@ class SymmMemPool:
                 f"SymmMemPool: symmetric block holds {handle.buffer_size} bytes, the pool needs "
                 f"{layout.nbytes} at offset {base_offset}."
             )
+        pad_ptrs = tuple(int(ptr) for ptr in handle.signal_pad_ptrs)
+        holder = _live_pads.get(pad_ptrs[self.rank])
+        if holder is not None:
+            raise RuntimeError(
+                f"SymmMemPool: the signal pad at {pad_ptrs[self.rank]:#x} of this allocation is "
+                f"live under {holder}: torch's symmetric allocator split one segment between the "
+                "two pools, and zeroing this pad (every allocation does) would clear that pool's "
+                "flags. Release that pool first, or allocate the pools from separate segments "
+                "(torch's symmetric memory pool with no_split=True); a larger pad "
+                "(set_signal_pad_size) does not separate them."
+            )
         self._buf, self._handle, self._base_offset, self._layout = buf, handle, base_offset, layout
+        self._pad_ptrs = pad_ptrs
         self._peer_buffers.clear()
+        self._peer_pads.clear()
         self.generation += 1
+        _live_pads[pad_ptrs[self.rank]] = repr(self)
         self._zero_signal_pad()
 
     def _zero_signal_pad(self) -> None:
@@ -663,6 +745,27 @@ class SymmMemPool:
             self._peer_buffers[peer] = view
         return view
 
+    def local_signal_pad(self) -> torch.Tensor:
+        """This rank's data-channel flags as a 1-D ``int32`` view of its signal pad: word
+        ``world_size * channel + src`` is flag ``(channel, src -> me)``, ``channels * world_size``
+        words in all (the barrier channel behind them is not included). For a protocol's own wait
+        kernel, which must keep ``wait_signal``'s consume semantics (acquire compare-and-swap
+        1 -> 0 at system scope, trap at the deadline). Valid for the current allocation
+        (:attr:`generation`); take it once per generation."""
+        self._require_reserved("local_signal_pad")
+        return self._handle.get_signal_pad(
+            self.rank, (self.channels * self.world_size,), torch.int32
+        )
+
+    def _peer_signal_pad(self, peer: int) -> torch.Tensor:
+        """``peer``'s whole signal pad as a flat ``uint32`` view (what ``memset32`` accepts)."""
+        view = self._peer_pads.get(peer)
+        if view is None:
+            words = int(self._handle.signal_pad_size) // _SIGNAL_BYTES
+            view = self._handle.get_signal_pad(peer, (words,), torch.uint32)
+            self._peer_pads[peer] = view
+        return view
+
     # --- signals (tiny kernels on the current CUDA stream) ------------------------------------
 
     def signal(self, peer: int, channel: int) -> None:
@@ -672,6 +775,65 @@ class SymmMemPool:
         self._check_peer(peer, "signal")
         self._check_channel(channel, "signal")
         self._handle.put_signal(peer, channel, self.timeout_ms)
+
+    def signal_write(self, peer: int, channel: int, stream: torch.cuda.Stream) -> None:
+        """Set flag ``(channel, me -> peer)`` on ``peer``'s pad from ``stream`` without an SM.
+
+        The word is the one :meth:`signal` (``put_signal``) writes, ``world_size * channel +
+        rank`` of ``peer``'s pad as mapped into this process (:attr:`signal_pad_ptrs`), set to
+        1. Eager: ``cuStreamWriteValue32`` on ``stream`` through cuda-python
+        (``cuda.bindings.driver``); no stream-context switch on the host. Under CUDA-graph
+        capture: ``_SymmetricMemory.memset32`` on ``stream`` (a memset node); ``stream`` must
+        already be part of the capture (forked from the capturing stream), else this raises
+        instead of writing the flag at capture time. The eager / captured pair is the one torch
+        uses for its own flag write (torch 2.13
+        ``torch/distributed/_symmetric_memory/__init__.py:957-972``,
+        ``_fused_all_gather_matmul_native``: ``stream_write_value32`` when eager, ``memset32``
+        when capturing); torch writes a LOCAL signal tensor there, so the precedent covers the
+        two operations, not the write into a peer's pad.
+
+        Ordering: both operations are stream-ordered behind the copies enqueued earlier on
+        ``stream`` (a copy completes, its writes performed, before the next operation on the
+        stream starts; the stream memory operation's default flags add a system-scope barrier
+        before the write) and the peer's wait is an acquire compare-and-swap at system scope,
+        so the peer reads the region after the copies landed. The peer-pad write itself (the
+        driver accepting the peer-mapped address for a stream memory operation; the captured
+        memset's store ordered as above) has no CPU model: it is exercised on the device at two
+        ranks before a protocol relies on it, eager and captured + replayed -- a marker copied
+        into the peer's slot-0 region on the forked stream, the flag written behind it, the
+        peer's :meth:`wait` then reading the marker, the word 0 after every wait (no lost put).
+        The unit tests check the word and the address arithmetic against a fake handle.
+
+        Unlike :meth:`signal` there is no back-pressure: the balance rule (one put per wait, the
+        previous put on this pair consumed before the next) is the caller's, and a put on a
+        still-set flag is lost -- the word stays 1 and the pair's next wait spins to the deadline
+        one boundary later instead of the put trapping at once. The wait side is unchanged:
+        :meth:`wait`, or a protocol's own kernel over :meth:`local_signal_pad` with the same
+        consume semantics (acquire compare-and-swap 1 -> 0 at system scope).
+        """
+        self._require_reserved("signal_write")
+        self._check_peer(peer, "signal_write")
+        self._check_channel(channel, "signal_write")
+        word = self.world_size * channel + self.rank
+        if not _is_capturing():
+            addr = self._pad_ptrs[peer] + _SIGNAL_BYTES * word
+            (err,) = _cuda_driver().cuStreamWriteValue32(stream.cuda_stream, addr, 1, 0)
+            if int(err) != 0:
+                raise RuntimeError(
+                    f"SymmMemPool.signal_write: cuStreamWriteValue32 failed ({err}; peer {peer}, "
+                    f"channel {channel}, address {addr:#x})."
+                )
+            return
+        with torch.cuda.stream(stream):
+            if not _is_capturing():
+                raise RuntimeError(
+                    "SymmMemPool.signal_write under CUDA-graph capture on a stream outside the "
+                    "capture: fork it from the capturing stream (wait_event / wait_stream) before "
+                    "the copies it signals."
+                )
+            _symm_mem()._SymmetricMemory.memset32(
+                self._peer_signal_pad(peer), offset=word, val=1, count=1
+            )
 
     def wait(self, src: int, channel: int) -> None:
         """Spin (up to the deadline) until flag ``(channel, src -> me)`` is set, then clear it."""
@@ -701,6 +863,10 @@ class SymmMemPool:
         torch.cuda.synchronize(self.device)
         if fence and dist.is_initialized():
             dist.barrier(group=self.group)
+        if self._pad_ptrs:
+            _live_pads.pop(self._pad_ptrs[self.rank], None)
+        self._pad_ptrs = ()
+        self._peer_pads.clear()
         self._peer_buffers.clear()
         self._handle = None
         self._buf = None
