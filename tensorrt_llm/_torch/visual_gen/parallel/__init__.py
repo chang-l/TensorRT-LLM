@@ -15,5 +15,7 @@
 """Token-sharded tensor parallelism for VisualGen (``parallel_config.tp_layout='token_sharded'``).
 
 ``token_sharded_tp`` holds the token plan, the collectives and the model's sharder,
-``token_sharded_modules`` the adapters that convert a model's tensor-parallel modules.
+``token_sharded_modules`` the adapters that convert a model's tensor-parallel modules and
+``token_sharded_ce_gather`` the copy-engine all-gather over a symmetric-memory pool and the
+body of the fused ``trtllm::token_sharded_fp8_ce_gather_gemm`` op.
 """

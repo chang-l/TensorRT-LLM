@@ -945,9 +945,9 @@ def _logic_cuda_graph(rank, world_size, device):
 # =============================================================================
 
 
-def _fp8_chain_parts(rank, world_size, device, d=256, n_col=128):
+def _fp8_chain_parts(rank, world_size, device, d=256, n_col=128, gather_mode=None):
     """A converted FP8 block-scale column Linear (gathers FP8 + packed scales) and a converted
-    bf16 row Linear (reduce-scatters)."""
+    bf16 row Linear (reduce-scatters); ``gather_mode`` selects the helper's gather."""
     torch.manual_seed(4)
     col_w = torch.randn(n_col * world_size, d, dtype=torch.bfloat16) * 0.05
     col = Linear(
@@ -961,7 +961,11 @@ def _fp8_chain_parts(rank, world_size, device, d=256, n_col=128):
         reduce_output=False,
     ).to(device)
     _, row = _boundary_chain_parts(rank, world_size, device, d, n_col)
-    tp = _helper()
+    tp = (
+        _helper()
+        if gather_mode is None
+        else TokenShardedTP(dist.group.WORLD, gather_mode=gather_mode)
+    )
     convert_to_token_sharded_tp(_as_model(col=col, row=row), tp, exceptions={"col": "column"})
     col.load_weights([{**_fp8_block_checkpoint(col_w), "bias": torch.zeros(n_col * world_size)}])
     col.post_load_weights()
@@ -1051,6 +1055,374 @@ def _logic_cuda_graph_fp8(rank, world_size, device):
         ok = all(torch.equal(got_t, ref_t) for got_t, ref_t in zip(static_out, ref))
         _check(ok, f"FP8 CUDA graph replay vs eager {(b, s)}", device)
         del graph
+
+
+# =============================================================================
+# Copy-engine all-gather (symmetric memory): transport, per-chunk GEMM, adapters, graphs
+# =============================================================================
+#
+# The copy-engine gather needs the FP8 block-scale DeepGEMM path (SM100 family) and a TP group
+# whose symmetric-memory probe accepts it; a rejected probe fails these checks loudly (it names
+# the reason) rather than skipping, since the product path would silently lose the gather.
+
+
+def _ce_module():
+    from tensorrt_llm._torch.visual_gen.parallel import token_sharded_ce_gather
+
+    return token_sharded_ce_gather
+
+
+def _ce_reason(tp):
+    """Why ``tp``'s copy-engine gather is not effective (for a failure message)."""
+    return getattr(getattr(tp, "_ce_state", None), "reason", "no gather state")
+
+
+def _logic_fp8_block_gemm_out(rank, world_size, device):
+    """The per-chunk GEMM into a row block of one output is bitwise the stock op on all rows
+    (same kernel, same operands), including chunks whose scale slice must be re-strided."""
+    tsc = _ce_module()
+    for k, n in ((640, 256), (5120, 384)):  # P = 2 and 10 packed scale columns
+        weight = torch.randn(n, k, generator=torch.Generator().manual_seed(k)) * 0.05
+        col = Linear(
+            k,
+            n,
+            bias=False,
+            dtype=torch.bfloat16,
+            quant_config=QuantConfig(quant_algo=QuantAlgo.FP8_BLOCK_SCALES),
+        ).to(device)
+        col.load_weights([_fp8_block_checkpoint(weight.to(torch.bfloat16))])
+        col.post_load_weights()
+        tsc.validate_fp8_block_consumer(col)
+        for m_total, chunks in ((420, 4), (418, 2), (8192, 4)):  # m % 4 != 0 chunks too
+            x = (torch.randn(m_total, k, generator=torch.Generator().manual_seed(m_total)) * 2).to(
+                device, torch.bfloat16
+            )
+            fp8, sf = quantize_fp8_block(x)
+            ref = torch.ops.trtllm.fp8_prequantized_swap_ab_gemm(
+                fp8, sf, col.weight, col.weight_scale, torch.bfloat16, True
+            )
+            out = torch.empty_like(ref)
+            m = m_total // chunks
+            for c in range(chunks):
+                r0, r1 = c * m, (c + 1) * m
+                tsc.fp8_block_gemm_out(
+                    fp8[r0:r1],
+                    tsc.mn_major_scales(sf[r0:r1]),
+                    col.weight,
+                    col.weight_scale,
+                    out[r0:r1],
+                )
+            _check(
+                torch.equal(out, ref),
+                f"per-chunk GEMM != stock op (K={k}, N={n}, M={m_total}, chunks={chunks})",
+                device,
+            )
+
+
+def _logic_ce_transport(rank, world_size, device):
+    """CeAllGather vs tp.all_gather: 20 boundaries per shape with slot alternation, the chunk
+    views in DeepGEMM's layout, a reset after a rank-symmetric failure, the pool growing across
+    shapes and never shrinking, protocol misuse raising, and release emptying the registry."""
+    tsc = _ce_module()
+    group = dist.group.WORLD
+    state = tsc.register_state(tsc.CeGatherState(group, group.group_name))
+    tp = _helper()
+    k = 5120
+    state.note_consumer(k)
+    slot_bytes = []
+
+    def boundary(m, seed):
+        x = (torch.randn(m, k, generator=torch.Generator().manual_seed(seed)) * 3).to(
+            device, torch.bfloat16
+        )
+        loc = quantize_fp8_block(x)
+        ref = tp.all_gather(loc)  # unpadded plan: [tp * m, K] fp8, (tp * m, P) scales
+        slot = state.next_slot()
+        transport = state.transport
+        transport.issue(loc.fp8, loc.scale, slot)
+        got_fp8 = torch.empty(world_size * m, k, dtype=torch.float8_e4m3fn, device=device)
+        got_sf = torch.empty(world_size * m, loc.scale.shape[1], dtype=torch.int32, device=device)
+        layout_ok = True
+        for src in (rank, *transport.consume_order):
+            fp8_s, sf_s = transport.chunk(src, slot)
+            layout_ok &= (
+                fp8_s.shape == (m, k)
+                and fp8_s.is_contiguous()
+                and fp8_s.data_ptr() % 16 == 0
+                and sf_s.shape == (m, loc.scale.shape[1])
+                and sf_s.stride() == (1, pad_up(m, 4))
+                and sf_s.data_ptr() % 16 == 0
+            )
+            got_fp8[src * m : (src + 1) * m].copy_(fp8_s)
+            got_sf[src * m : (src + 1) * m].copy_(sf_s)
+        transport.done(slot)
+        equal = torch.equal(got_fp8.view(torch.uint8), ref.fp8.view(torch.uint8)) and torch.equal(
+            got_sf, ref.scale
+        )
+        return slot, layout_ok, equal, loc
+
+    for m in (105, 209, 18900):
+        plan = tp.begin(1, m * world_size)
+        assert plan.local_rows == m
+        state.prepare(plan)
+        _check(
+            state.effective, f"copy-engine gather probe rejected this group: {state.reason}", device
+        )
+        transport = state.transport
+        layout = tsc.RegionLayout(m, k)
+        _check(
+            transport.covers(layout) and transport.slot_nbytes >= layout.slot_nbytes(world_size),
+            f"pool holds {transport.slot_nbytes} bytes per slot; m={m} needs {layout.slot_nbytes(world_size)}",
+            device,
+        )
+        slot_bytes.append(transport.slot_nbytes)
+        for i in range(20):
+            slot, layout_ok, equal, _ = boundary(m, rank * 1000 + m + i)
+            _check(
+                slot == i % 2, f"slot {slot} at boundary {i} (prepare resets the sequence)", device
+            )
+            _check(layout_ok, f"chunk views are not in DeepGEMM's layout at m={m}", device)
+            _check(equal, f"CE gather != NCCL all_gather at m={m}, boundary {i}", device)
+        # A rank-symmetric failure after issue(): reset() releases the slot on every rank and the
+        # protocol continues in step.
+        _, _, _, loc = boundary(m, 7)
+        transport.issue(loc.fp8, loc.scale, state.next_slot())
+        transport.reset()
+        state.begin_forward()  # must not raise
+        for i in range(2):
+            _, _, equal, _ = boundary(m, 100 + i)
+            _check(
+                equal, f"CE gather != NCCL all_gather after reset() at m={m}, boundary {i}", device
+            )
+    _check(
+        slot_bytes[0] < slot_bytes[1] < slot_bytes[2], f"pool did not grow: {slot_bytes}", device
+    )
+    plan = tp.begin(1, 105 * world_size)
+    state.prepare(plan)
+    _check(
+        state.transport.slot_nbytes == slot_bytes[2], "the pool shrank for a smaller shape", device
+    )
+    transport = state.transport
+    with pytest.raises(RuntimeError, match="needs an issue"):
+        transport.chunk(rank, 0)
+    with pytest.raises(RuntimeError, match="without an issue"):
+        transport.done(0)
+    too_big = torch.zeros(2 * 18900, k, device=device, dtype=torch.bfloat16)  # 2x the pool
+    with pytest.raises(RuntimeError, match="reserve"):
+        transport.issue(*quantize_fp8_block(too_big), 0)
+    del too_big
+    state.close()
+    with pytest.raises(KeyError):
+        tsc.get_state(group.group_name)
+    w = torch.zeros(128, k, dtype=torch.float8_e4m3fn, device=device)
+    ws = torch.zeros(tsc.packed_weight_scale_cols(k), 128, dtype=torch.int32, device=device).t()
+    with pytest.raises(RuntimeError, match="no CeGatherState is registered"):
+        torch.ops.trtllm.token_sharded_fp8_ce_gather_gemm(
+            loc.fp8,
+            loc.scale,
+            w,
+            ws,
+            group.group_name,
+            rank,
+            world_size,
+            1,
+            105 * world_size,
+            105 * world_size,
+        )
+
+
+def _logic_adapters_ce_gather(rank, world_size, device):
+    """FP8 block-scale column Linear and MLP converted with ``gather_mode="copy_engine"`` are
+    bitwise the NCCL-gather adapters, eager and torch.compile'd; the helper's all_gather is
+    bypassed at those boundaries and the engagement rule holds."""
+    import torch._dynamo
+
+    from tensorrt_llm._torch.model_config import ModelConfig
+    from tensorrt_llm._torch.modules.mlp import MLP
+
+    k_in, n_out = 640, 128 * world_size  # P = 2 packed scale columns
+    torch.manual_seed(6)
+    weight = torch.randn(n_out, k_in, dtype=torch.bfloat16) * 0.05
+    bias = torch.randn(n_out, dtype=torch.bfloat16) * 0.1
+    w_up = torch.randn(n_out, k_in, dtype=torch.bfloat16) * 0.05
+    w_down = torch.randn(k_in, n_out, dtype=torch.bfloat16) * 0.05
+    ckpt_col = {**_fp8_block_checkpoint(weight), "bias": bias}
+    ckpt_up, ckpt_down = _fp8_block_checkpoint(w_up), _fp8_block_checkpoint(w_down)
+    mapping = _mapping(rank, world_size)
+    fp8bs = QuantConfig(quant_algo=QuantAlgo.FP8_BLOCK_SCALES)
+
+    def build(gather_mode):
+        col = Linear(
+            k_in,
+            n_out,
+            bias=True,
+            dtype=torch.bfloat16,
+            mapping=mapping,
+            quant_config=fp8bs,
+            tensor_parallel_mode=TensorParallelMode.COLUMN,
+            reduce_output=False,
+        ).to(device)
+        config = ModelConfig(
+            mapping=mapping, allreduce_strategy=AllReduceStrategy.NCCL, quant_config=fp8bs
+        )
+        mlp = MLP(
+            hidden_size=k_in,
+            intermediate_size=n_out,
+            bias=False,
+            activation=gelu_tanh,
+            dtype=torch.bfloat16,
+            config=config,
+        ).to(device)
+        tp = TokenShardedTP(dist.group.WORLD, gather_mode=gather_mode)
+        convert_to_token_sharded_tp(_as_model(col=col, mlp=mlp), tp, exceptions={"col": "column"})
+        col.load_weights([ckpt_col])
+        mlp.up_proj.load_weights([ckpt_up])
+        mlp.down_proj.load_weights([ckpt_down])
+        for lin in (col, mlp.up_proj, mlp.down_proj):
+            lin.post_load_weights()
+        return tp, col, mlp
+
+    tp_ref, col_ref, mlp_ref = build("nccl")
+    tp_ce, col_ce, mlp_ce = build("copy_engine")
+    moved = _spy_all_gather(tp_ce)
+    for b, s in _FP8_SHAPES:
+        x = torch.randn(b, s, k_in, generator=torch.Generator().manual_seed(s)).to(
+            device, torch.bfloat16
+        )
+        tp_ref.begin(b, s)
+        tp_ce.begin(b, s)
+        _check(
+            tp_ce.effective_gather_mode == "copy_engine",
+            f"copy-engine gather not effective: {_ce_reason(tp_ce)}",
+            device,
+        )
+        x_loc = tp_ce.local_view(tp_ce.shard(x))
+        h_ref, f_ref = col_ref(x_loc), mlp_ref(x_loc)
+        n_moved = len(moved)
+        h, f = col_ce(x_loc), mlp_ce(x_loc)
+        _check(torch.equal(h, h_ref), f"CE column adapter != NCCL {(b, s)}", device)
+        _check(torch.equal(f, f_ref), f"CE MLP adapter != NCCL {(b, s)}", device)
+        _check(len(moved) == n_moved, f"the CE adapters still all-gathered {(b, s)}", device)
+        rule = (
+            tp_ce.uses_ce_gather(col_ce, x_loc)
+            and tp_ce.uses_ce_gather(mlp_ce.up_proj, quantize_fp8_block(x_loc))
+            and not tp_ce.uses_ce_gather(col_ce, x_loc, {"active": True})  # LoRA: dense input
+            and not tp_ce.uses_ce_gather(mlp_ce.down_proj, x_loc)  # not a column consumer
+            and not tp_ce.uses_ce_gather(col_ce, x_loc.float())  # not bf16
+            and not tp_ref.uses_ce_gather(col_ref, x_loc)  # NCCL mode
+        )
+        _check(rule, f"uses_ce_gather rule {(b, s)}", device)
+    del tp_ce.all_gather  # drop the spy (an instance attribute) before compiling
+    torch._dynamo.reset()
+    col_c = torch.compile(lambda t: col_ce(t))
+    mlp_c = torch.compile(lambda t: mlp_ce(t))
+    for b, s in [(2, 256), (1, 5), (1, 418), (2, 256)]:
+        x = torch.randn(b, s, k_in, generator=torch.Generator().manual_seed(2 * s)).to(
+            device, torch.bfloat16
+        )
+        tp_ref.begin(b, s)
+        tp_ce.begin(b, s)
+        x_loc = tp_ce.local_view(tp_ce.shard(x))
+        _check(
+            torch.equal(col_c(x_loc), col_ref(x_loc)),
+            f"compiled CE column != NCCL {(b, s)}",
+            device,
+        )
+        _check(
+            torch.equal(mlp_c(x_loc), mlp_ref(x_loc)), f"compiled CE MLP != NCCL {(b, s)}", device
+        )
+    tp_ce.close()
+    tp_ce.close()  # idempotent
+
+
+def _logic_compile_fullgraph_ce(rank, world_size, device):
+    """torch.compile(fullgraph=True) of the FP8 boundary chain with the copy-engine gather on:
+    one graph (the fused op is opaque), bitwise the eager chain on the GEMM output."""
+    import torch._dynamo
+
+    d = 256
+    tp, col, row = _fp8_chain_parts(rank, world_size, device, d, gather_mode="copy_engine")
+    chain = _make_fp8_chain(tp, col, row)
+
+    def compare(got, ref, b, s, what):
+        _check_close(got[0], ref[0], device, 1e-2, 1e-2, f"{what} CE residual {(b, s)}")
+        ok = all(torch.equal(g, r) for g, r in zip(got[1:], ref[1:]))
+        _check(ok, f"{what} CE gather + GEMM {(b, s)}", device)
+
+    def run_compiled(compiled, args):
+        try:
+            return compiled(*args)
+        except torch._dynamo.exc.Unsupported as e:
+            if "all_reduce" in str(e).lower() or "allreduce" in str(e).lower():
+                print(
+                    f"SKIP _logic_compile_fullgraph_ce: the AllReduce in the overlay is not "
+                    f"traceable under fullgraph=True ({e})",
+                    flush=True,
+                )
+                return None
+            raise
+
+    for b, s in [(2, 256), (2, 5), (1, 5), (1, 418)]:
+        tp.begin(b, s)
+        _check(tp.effective_gather_mode == "copy_engine", _ce_reason(tp), device)
+        args = _fp8_chain_inputs(tp, b, s, d, device)
+        torch._dynamo.reset()
+        got = run_compiled(torch.compile(chain, fullgraph=True), args)
+        if got is None:
+            tp.close()
+            return
+        compare(got, chain(*args), b, s, "compiled")
+    torch._dynamo.reset()
+    compiled = torch.compile(chain, fullgraph=True)
+    for b, s in [(2, 256), (1, 5), (2, 256)]:
+        tp.begin(b, s)
+        args = _fp8_chain_inputs(tp, b, s, d, device)
+        compare(run_compiled(compiled, args), chain(*args), b, s, "recompiled")
+    tp.close()
+
+
+def _logic_cuda_graph_ce(rank, world_size, device):
+    """CUDA-graph capture + replay of the FP8 boundary chain with the copy-engine gather on:
+    begin() reserves the pool eagerly, two eager boundaries precede the capture (the consumed
+    waits are in the graph), the replay is bitwise the eager chain on new inputs, and a larger
+    shape after the captures is refused rather than growing the pool under the graphs."""
+    d = 256
+    tp, col, row = _fp8_chain_parts(rank, world_size, device, d, gather_mode="copy_engine")
+    chain = _make_fp8_chain(tp, col, row)
+    for b, s in [(2, 256), (2, 5), (1, 5), (1, 418)]:
+        tp.begin(b, s)  # eager: probes once, sizes the pool for this shape
+        _check(tp.effective_gather_mode == "copy_engine", _ce_reason(tp), device)
+        args = _fp8_chain_inputs(tp, b, s, d, device)
+        static_args = [a.clone() for a in args]
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(2):  # eager warmups (as CUDAGraphRunner.WARMUP_STEPS), >= slots
+                chain(*static_args)
+        torch.cuda.current_stream().wait_stream(stream)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            static_out = chain(*static_args)
+        new_args = [args[0] * 0.5 + 0.25, args[1] * 0.5, args[2] * 0.75 - 0.5]
+        for dst, src in zip(static_args, new_args):
+            dst.copy_(src)
+        graph.replay()
+        torch.cuda.synchronize()
+        ref = chain(*new_args)
+        ok = all(torch.equal(got_t, ref_t) for got_t, ref_t in zip(static_out, ref))
+        _check(ok, f"CE CUDA graph replay vs eager {(b, s)}", device)
+        # A second replay reuses the slot protocol in steady state.
+        graph.replay()
+        torch.cuda.synchronize()
+        ok = all(torch.equal(got_t, ref_t) for got_t, ref_t in zip(static_out, ref))
+        _check(ok, f"CE CUDA graph second replay vs eager {(b, s)}", device)
+        del graph
+    # The pool holds the captured graphs' buffers: a shape that needs a larger pool must now
+    # be refused (rank-symmetrically, before any collective) instead of reallocating.
+    with pytest.raises(RuntimeError, match="would grow after a CUDA graph"):
+        tp.begin(2, 512)
+    tp.close()
 
 
 # =============================================================================
@@ -1190,6 +1562,9 @@ _GRAPH_CHECKS = (_logic_compile_fullgraph, _logic_cuda_graph)
 # The FP8 block-scale gather: real DeepGEMM Linear / MLP, the quantize tactics, and the graphs.
 _FP8_KERNEL_CHECKS = (_logic_fp8_quant_tactics, _logic_adapters_fp8_block_scales)
 _FP8_GRAPH_CHECKS = (_logic_compile_fullgraph_fp8, _logic_cuda_graph_fp8)
+# The copy-engine gather: per-chunk GEMM, transport, adapters in both modes, and the graphs.
+_CE_CHECKS = (_logic_fp8_block_gemm_out, _logic_ce_transport, _logic_adapters_ce_gather)
+_CE_GRAPH_CHECKS = (_logic_compile_fullgraph_ce, _logic_cuda_graph_ce)
 
 
 def _run_checks(rank, world_size, device, checks):
@@ -1226,6 +1601,16 @@ def test_kernels_nccl(world_size):
 def test_fp8_block_scales_nccl(world_size):
     _requires_sm100f()
     checks = _FP8_KERNEL_CHECKS + (_FP8_GRAPH_CHECKS if world_size == 2 else ())
+    _run(world_size, _checks(*checks), "nccl")
+
+
+@pytest.mark.parametrize("world_size", [2, 3, 4, 8])
+def test_fp8_ce_gather_nccl(world_size):
+    """The copy-engine all-gather of FP8 block-scale inputs (symmetric memory): bitwise the
+    NCCL gather at the transport, GEMM and adapter levels; fullgraph compile and CUDA-graph
+    replay of a boundary chain at world size 2."""
+    _requires_sm100f()
+    checks = _CE_CHECKS + (_CE_GRAPH_CHECKS if world_size == 2 else ())
     _run(world_size, _checks(*checks), "nccl")
 
 

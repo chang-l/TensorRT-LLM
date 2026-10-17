@@ -17,7 +17,8 @@
 Each case compares the token-sharded model against, with the same weights: the plain-TP model
 whose all-reduces are replaced by the same reduce-scatter + all-gather (``_EmulatedAllReduce``;
 the blocks' output must match bitwise), the single-GPU model (relative L2), and the plain-TP
-model (only the collectives' reduction order differs).
+model (only the collectives' reduction order differs). The FP8 block-scale block cases run in
+both gather modes (NCCL all-gather, copy-engine fused gather + GEMM).
 
 Run with (needs >= 4 GPUs; the TP8 block case needs 8):
     pytest tests/unittest/_torch/visual_gen/multi_gpu/test_wan_token_sharded_tp.py -v
@@ -807,7 +808,38 @@ def _to_fp8_block(entry):
     }
 
 
-def _logic_fp8_block_scales_block(rank, world_size, *, batch, thw):
+def _token_sharded_block_forward(tp, block, x, block_inputs, batch, seq):
+    """The token-sharded block on this rank's shard of ``x`` -> all ``[B, S, D]`` rows (one
+    boundary chain: begin, shard, the block's three gathers, unshard). ``block_inputs`` are
+    the all-reduce block's ``(x, enc, temb, freqs_cos, freqs_sin, timestep)``."""
+    _, enc, temb, *rest = block_inputs
+    plan = tp.begin(batch, seq)
+    out = block(tp.local_view(tp.shard(x)), enc, tp.per_sample_table(temb), *rest)
+    return tp.unshard(out.reshape(plan.local_rows, -1))
+
+
+def _build_fp8_token_sharded_block(vgm, device, fp8_weights, params, gather_mode):
+    """A converted FP8 block-scale WanBlock and its helper in ``gather_mode``."""
+    from tensorrt_llm._torch.visual_gen.models.wan.transformer_wan import WanBlock
+
+    ts_cfg = _block_config(vgm, QuantAlgo.FP8_BLOCK_SCALES, True)
+    tp = TokenShardedTP(vgm.tp_group_pg, tp_rank=vgm.tp_rank, gather_mode=gather_mode)
+    ts_block = WanBlock(ts_cfg, 0).to(device)
+    convert_to_token_sharded_tp(_as_model(ts_block), tp)
+    _load_block(ts_block, fp8_weights, params)
+    return tp, ts_block
+
+
+def _logic_fp8_block_scales_block(
+    rank, world_size, *, batch, thw, gather_mode="nccl", compiled=False, cuda_graph=False
+):
+    """One FP8 block-scale WanBlock in ``gather_mode`` vs the all-reduce block.
+
+    ``compiled``: the block compiled with torch.compile must be bitwise the compiled block of
+    the other gather mode (the fused copy-engine op is opaque to Inductor, as the NCCL
+    gather is). ``cuda_graph``: a CUDA graph of the eager boundary chain, captured after the
+    eager warm-up, replays bitwise against eager, with a fresh payload too.
+    """
     from tensorrt_llm._torch.visual_gen.models.wan.transformer_wan import (
         WanBlock,
         WanRotaryPosEmbed,
@@ -836,11 +868,7 @@ def _logic_fp8_block_scales_block(rank, world_size, *, batch, thw):
 
     ar_block = WanBlock(_block_config(vgm, QuantAlgo.FP8_BLOCK_SCALES, False), 0).to(device)
     _load_block(ar_block, fp8_weights, params)
-    ts_cfg = _block_config(vgm, QuantAlgo.FP8_BLOCK_SCALES, True)
-    tp = TokenShardedTP.from_model_config(ts_cfg)
-    ts_block = WanBlock(ts_cfg, 0).to(device)
-    convert_to_token_sharded_tp(_as_model(ts_block), tp)
-    _load_block(ts_block, fp8_weights, params)
+    tp, ts_block = _build_fp8_token_sharded_block(vgm, device, fp8_weights, params, gather_mode)
     # The norms emit bf16 (no static NVFP4 scale) and all three consumers take the FP8 pair.
     norm_scales = (ts_block._norm1_fp4_scale, ts_block._norm2_fp4_scale, ts_block._norm3_fp4_scale)
     consumers = (ts_block.attn1.qkv_proj, ts_block.attn2.to_q, ts_block.ffn.up_proj)
@@ -849,30 +877,45 @@ def _logic_fp8_block_scales_block(rank, world_size, *, batch, thw):
         "the FP8 block-scale rule engages for attn1.qkv_proj, attn2.to_q and ffn.up_proj",
     )
 
-    # A silent BF16 gather must fail: the adapters quantize inside, so the hook sits on the
-    # helper's all-gather, which must move the FP8 pair at all three block boundaries.
-    moved = []
-    gather = tp.all_gather
+    # A silent BF16 gather or a silent fallback must fail: the adapters quantize inside, so
+    # the hooks sit on the helper's all-gather (NCCL mode: moves the FP8 pair at all three
+    # boundaries) and on its fused copy-engine gather + GEMM (copy-engine mode: takes the
+    # three bf16 norm outputs; the all-gather moves nothing).
+    moved, fused = [], []
+    gather, ce_gemm = tp.all_gather, tp.ce_gather_gemm
 
-    def spy(act):
+    def spy_gather(act):
         moved.append(type(act))
         return gather(act)
 
+    def spy_ce(consumer, act):
+        fused.append(type(act))
+        return ce_gemm(consumer, act)
+
     with torch.no_grad():
         ref = ar_block(*block_inputs)
-        plan = tp.begin(batch, seq)
-        tp.all_gather = spy
-        out = ts_block(
-            tp.local_view(tp.shard(x)), enc, tp.per_sample_table(temb), *block_inputs[3:]
-        )
-        tp.all_gather = gather
-        out = tp.unshard(out.reshape(plan.local_rows, -1))
+        tp.all_gather, tp.ce_gather_gemm = spy_gather, spy_ce
+        out = _token_sharded_block_forward(tp, ts_block, x, block_inputs, batch, seq)
+        tp.all_gather, tp.ce_gather_gemm = gather, ce_gemm
         _replace_all_reduce(_as_model(ar_block), lambda: _EmulatedAllReduce(tp))
         emu = ar_block(*block_inputs)
         _replace_all_reduce(_as_model(ar_block), _ExactAllReduce)
         exact = ar_block(*block_inputs)
-    _check(moved == [Fp8BlockScaledActivation] * 3, f"boundary all-gathers moved {moved}")
-    desc = f"tp={world_size} B={batch} S={seq} padded={tp.plan.is_padded}"
+    desc = f"tp={world_size} B={batch} S={seq} padded={tp.plan.is_padded} gather={gather_mode}"
+    _check(
+        tp.effective_gather_mode == gather_mode,
+        f"{desc}: the gather mode is not effective ({tp._ce_state and tp._ce_state.reason})",
+    )
+    if gather_mode == "copy_engine":
+        _check(
+            fused == [torch.Tensor] * 3 and moved == [],
+            f"{desc}: boundaries fused {fused}, all-gathered {moved}",
+        )
+    else:
+        _check(
+            moved == [Fp8BlockScaledActivation] * 3 and fused == [],
+            f"{desc}: boundaries all-gathered {moved}, fused {fused}",
+        )
     _check(torch.equal(out, emu), f"{desc}: token-sharded TP != emulated all-reduce block")
     cos = torch.nn.functional.cosine_similarity(out.float().flatten(), ref.float().flatten(), dim=0)
     err = _rel_l2(out, ref)
@@ -885,22 +928,119 @@ def _logic_fp8_block_scales_block(rank, world_size, *, batch, thw):
         f"{desc}: vs fp32-exact all-reduce: token-sharded {ts_err:.3e}, plain TP {ar_err:.3e}",
     )
 
+    others = []
+    if compiled:
+        import torch._dynamo as torch_dynamo
+
+        other_mode = "nccl" if gather_mode == "copy_engine" else "copy_engine"
+        other_tp, other_block = _build_fp8_token_sharded_block(
+            vgm, device, fp8_weights, params, other_mode
+        )
+        others.append(other_tp)
+        torch_dynamo.reset()
+        outs = {}
+        with torch.no_grad():
+            for mode, helper, block in (
+                (gather_mode, tp, ts_block),
+                (other_mode, other_tp, other_block),
+            ):
+                _token_sharded_block_forward(helper, block, x, block_inputs, batch, seq)  # warm
+                compiled_block = torch.compile(block, dynamic=None, fullgraph=False)
+                outs[mode] = _token_sharded_block_forward(
+                    helper, compiled_block, x, block_inputs, batch, seq
+                )
+        _check(
+            other_tp.effective_gather_mode == other_mode,
+            f"{desc}: the {other_mode} gather mode is not effective",
+        )
+        _check(
+            torch.equal(outs[gather_mode], outs[other_mode]),
+            f"{desc}: compiled {gather_mode} block != compiled {other_mode} block (rel-L2 "
+            f"{_rel_l2(outs[gather_mode], outs[other_mode]):.3e})",
+        )
+        err = _rel_l2(outs[gather_mode], out)
+        _check(err <= 1e-2, f"{desc}: compiled vs eager token-sharded block rel-L2 {err:.3e}")
+
+    if cuda_graph:
+        # As CUDAGraphRunner: eager warm-up on the static inputs (both pool slots used once the
+        # three boundaries ran), then capture on the current stream. begin() inside the
+        # capture must not allocate (the pool is sized) and the chain must leave nothing
+        # pending on side streams, or the capture fails.
+        static_x = x.clone()
+        with torch.no_grad():
+            for _ in range(2):
+                _token_sharded_block_forward(tp, ts_block, static_x, block_inputs, batch, seq)
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                graph_out = _token_sharded_block_forward(
+                    tp, ts_block, static_x, block_inputs, batch, seq
+                )
+            graph.replay()
+            torch.cuda.synchronize()
+            _check(
+                torch.equal(graph_out, out),
+                f"{desc}: CUDA-graph replay != eager (rel-L2 {_rel_l2(graph_out, out):.3e})",
+            )
+            x2 = torch.randn(batch, seq, d, generator=gen).to(device, torch.bfloat16)
+            static_x.copy_(x2)
+            graph.replay()
+            torch.cuda.synchronize()
+            replayed = graph_out.clone()
+            eager2 = _token_sharded_block_forward(tp, ts_block, x2, block_inputs, batch, seq)
+            _check(
+                torch.equal(replayed, eager2),
+                f"{desc}: CUDA-graph replay on a fresh payload != eager (rel-L2 "
+                f"{_rel_l2(replayed, eager2):.3e})",
+            )
+        del graph
+    # As BasePipeline.cleanup(): release the copy-engine state before the group goes away.
+    for helper in (tp, *others):
+        helper.close()
+    torch.cuda.synchronize()
+
 
 class TestWanTokenShardedTPFP8BlockScalesBlock:
+    @pytest.mark.parametrize("gather_mode", ["nccl", "copy_engine"])
     @pytest.mark.parametrize(
         "world_size,batch,thw",
         [(2, 2, (1, 16, 16)), (3, 2, (3, 5, 7)), (4, 2, (3, 5, 7)), (8, 2, (4, 15, 16))],
         ids=["tp2_S256", "tp3_S105", "tp4_S105_padded", "tp8_S960"],
     )
-    def test_fp8_block_scales_block(self, world_size, batch, thw):
-        """D=5120 FP8 block-scale WanBlock (FP8 + scales all-gathers into DeepGEMM): bitwise vs
-        the emulated all-reduce block, close to the plain one, and within 1.5x of its error vs
-        an fp32-exact all-reduce."""
+    def test_fp8_block_scales_block(self, world_size, batch, thw, gather_mode):
+        """D=5120 FP8 block-scale WanBlock, with the FP8 + scales all-gathered by NCCL into
+        DeepGEMM or moved by copy engines into the fused per-source GEMM: bitwise vs the
+        emulated all-reduce block, close to the plain one, and within 1.5x of its error vs an
+        fp32-exact all-reduce."""
         if not torch.cuda.is_available() or not is_sm_100f():
             pytest.skip("The FP8 block-scale DeepGEMM path requires an SM100-family GPU")
         run_test_in_distributed(
             world_size=world_size,
-            test_fn=functools.partial(_logic_fp8_block_scales_block, batch=batch, thw=thw),
+            test_fn=functools.partial(
+                _logic_fp8_block_scales_block, batch=batch, thw=thw, gather_mode=gather_mode
+            ),
+        )
+
+    @pytest.mark.parametrize(
+        "world_size,batch,thw",
+        [(2, 2, (1, 16, 16)), (4, 2, (3, 5, 7))],
+        ids=["tp2_S256", "tp4_S105_padded"],
+    )
+    def test_fp8_block_scales_block_copy_engine_compiled_cuda_graph(self, world_size, batch, thw):
+        """The copy-engine block compiled with torch.compile is bitwise the compiled NCCL-gather
+        block, and a CUDA graph of its boundary chain replays bitwise vs eager."""
+        if not torch.cuda.is_available() or not is_sm_100f():
+            pytest.skip("The FP8 block-scale DeepGEMM path requires an SM100-family GPU")
+        run_test_in_distributed(
+            world_size=world_size,
+            test_fn=functools.partial(
+                _logic_fp8_block_scales_block,
+                batch=batch,
+                thw=thw,
+                gather_mode="copy_engine",
+                compiled=True,
+                cuda_graph=True,
+            ),
         )
 
 
