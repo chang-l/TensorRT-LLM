@@ -2373,8 +2373,8 @@ def token_sharded_fp8_ce_gemm_reduce_scatter(
     ``x_fp8`` ``[B * S_pad, K_local]`` float8_e4m3fn and ``x_sf``
     ``[B * S_pad, P]`` int32 packed UE8M0 scales are the quantized padded
     row-path input of all tokens, ``w_fp8`` / ``w_sf`` the row Linear's weight
-    and packed weight scale, ``bias`` its ``[N]`` bf16 bias on ``tp_rank`` 0
-    (None elsewhere and when the Linear has none). Returns this rank's reduced
+    and packed weight scale, ``bias`` its ``[N]`` bf16 bias, passed on every
+    rank (None when the Linear has none). Returns this rank's reduced
     rows ``[B * S_pad / tp_size, N]`` bf16 (pad rows kept, as the NCCL
     reduce-scatter's output): the fp32 fixed-source-order sum of the same bf16
     K-partials, rounded once, with the bias added in bf16 to source 0's partial

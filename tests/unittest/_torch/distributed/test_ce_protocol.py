@@ -24,7 +24,10 @@ the per-group state's probe fallback, setup failure and registry lifecycle on a 
 group. Then the token-sharded TP all-gather (``CeAllGather``) on the same fabric: its wiring of
 the base, the signal balance of its boundaries and recoveries, and the three behaviours it gained
 from the base (recovery from a raise inside the push loop, the capture mark on completion, the
-resync latch).
+resync latch). Then the token-sharded TP reduce-scatter (``CeReduceScatter``) the same way: its
+wiring (per-destination copy streams), the signal balance of its boundaries and recoveries at
+every raise point of its own test's matrix, the push-loop recovery through the base's generic
+arrival rule, the capture mark on completion and the resync latch.
 """
 
 import contextlib
@@ -44,9 +47,14 @@ from tensorrt_llm._torch.distributed.ce_protocol import (
 )
 from tensorrt_llm._torch.distributed.symm_mem_pool import DEFAULT_TIMEOUT_MS, PoolLayout
 from tensorrt_llm._torch.visual_gen.parallel import token_sharded_ce_gather as tsc
+from tensorrt_llm._torch.visual_gen.parallel import token_sharded_ce_reduce_scatter as tsr
 from tensorrt_llm._torch.visual_gen.parallel.token_sharded_ce_gather import (
     CeAllGather,
     RegionLayout,
+)
+from tensorrt_llm._torch.visual_gen.parallel.token_sharded_ce_reduce_scatter import (
+    Bf16RowsRegionLayout,
+    CeReduceScatter,
 )
 
 pytestmark = pytest.mark.cpu_only
@@ -1869,6 +1877,437 @@ def test_gather_first_eager_issue_after_a_reset_resyncs_once(recorder, monkeypat
     )
     _gather_boundary(fabric, transports, 1)
     _assert_gather_balanced(fabric, transports)
+    assert fabric.resyncs == 4  # one collective per recovery, nothing on the hot path
+
+
+# =============================================================================
+# The copy-engine reduce-scatter of token-sharded TP on the base: the real CeReduceScatter (its
+# layout, channels and schedule) on the same fabric -- the wiring, the signal balance after
+# plain boundaries and after a rank-symmetric raise at every point of its own test's matrix
+# (test_token_sharded_ce_reduce_scatter.py, unchanged), the push-loop recovery through the
+# base's generic arrival rule (parity: begin() already preceded the loop), and the two
+# behaviours its own transport did not have: the capture mark on completion, the resync latch
+# =============================================================================
+
+
+_RS_M, _RS_N = 8, 16  # rows per destination and N of the fabric boundaries
+_RS_LAYOUT = Bf16RowsRegionLayout(_RS_M, _RS_N)
+
+
+def _rs_fabric(world_size: int, monkeypatch) -> _Fabric:
+    fabric = _Fabric(world_size)
+    fabric.install(monkeypatch)
+    monkeypatch.setattr(tsr, "_is_capturing", fabric.is_capturing)
+    return fabric
+
+
+def _reduce_scatters(
+    fabric: _Fabric, slots: int = tsr.SLOTS, per_peer_streams: bool = True
+) -> list[CeReduceScatter]:
+    transports = []
+    for r in range(fabric.world_size):
+        fabric.rank = r
+        transports.append(
+            CeReduceScatter(
+                _GatherPool(fabric, r),  # the same byte regions; its four channels hold 2 slots
+                fabric.world_size,
+                r,
+                CPU,
+                slots=slots,
+                per_peer_streams=per_peer_streams,
+            )
+        )
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        assert t.reserve(_RS_LAYOUT) is True
+    fabric.transports = transports
+    return transports
+
+
+def _rs_block(src: int, dst: int, boundary: int) -> torch.Tensor:
+    """Source ``src``'s partial of destination ``dst``'s rows at boundary ``boundary``."""
+    seed = 1 + src + 16 * dst + 256 * boundary
+    gen = torch.Generator().manual_seed(seed)
+    return torch.randn((_RS_M, _RS_N), generator=gen).to(torch.bfloat16)
+
+
+@pytest.mark.parametrize("per_peer_streams", [True, False], ids=["per-peer", "one-stream"])
+@pytest.mark.parametrize("world_size", [2, 3, 4, 8])
+def test_rs_transport_wires_the_base(world_size, per_peer_streams, monkeypatch):
+    """``CeReduceScatter`` is a ``CeTransport`` with the reduce-scatter's orders -- it pushes to
+    ``me - 1, me - 2, ...`` and waits (so its pushes arrive) from ``me + 1, me + 2, ...`` -- on
+    one copy stream per destination (or one for all), one slot and two channels; its reserve is
+    the base's under the bf16 rows layout, with the reduce-scatter's post-check and its
+    first-use reset on a reallocation."""
+    fabric = _rs_fabric(world_size, monkeypatch)
+    fabric.rank = 1
+    pool = _GatherPool(fabric, 1)
+    t = CeReduceScatter(pool, world_size, 1, CPU, per_peer_streams=per_peer_streams)
+    assert isinstance(t, CeTransport) and t.pool is pool and t.slots == tsr.SLOTS == 1
+    assert t.tp_size == t.world_size == world_size and t.rank == 1
+    assert t.dest_order == tuple((1 - i) % world_size for i in range(1, world_size))
+    assert t.wait_order == tuple((1 + i) % world_size for i in range(1, world_size))
+    assert t.arrival_order == t.wait_order
+    assert len(t.streams) == (world_size - 1 if per_peer_streams else 1)
+    assert len({t.streams.stream(d) for d in t.dest_order}) == len(t.streams)
+    assert t.min_channels == 2 <= pool.channels
+    assert t.slot_nbytes == 0 and not t.covers(_RS_LAYOUT) and not pool.reserved
+    with pytest.raises(ValueError, match="world_size >= 2"):
+        CeReduceScatter(pool, 1, 0, CPU)
+    with pytest.raises(ValueError, match="0 <= rank < world_size"):
+        CeReduceScatter(pool, world_size, world_size, CPU)
+    with pytest.raises(ValueError, match="slots >= 1"):
+        CeReduceScatter(pool, world_size, 1, CPU, slots=0)
+    assert t.reserve(_RS_LAYOUT) is True and pool.generation == 1
+    assert t.covers(_RS_LAYOUT) and t.slot_nbytes >= _RS_LAYOUT.slot_nbytes(world_size)
+    assert t.slot_nbytes == pool.slot_nbytes and pool.slots == 1
+    assert t.reserve(Bf16RowsRegionLayout(1, 8)) is False  # covered: no-op
+    t._uses = [2]
+    bigger = Bf16RowsRegionLayout(4 * _RS_M, 640)
+    assert t.reserve(bigger) is True and pool.generation == 2
+    assert t._uses == [0]  # a reallocation zeroes the pads: the slot is at its first use
+    assert t.covers(_RS_LAYOUT) and t.covers(bigger)
+    t.close()
+    assert pool.releases == 1 and t.slot_nbytes == 0 and not t.covers(_RS_LAYOUT)
+
+
+def _rs_raise_points(world_size: int) -> list:
+    """Every point of a reduce-scatter boundary a rank-symmetric raise can hit (the matrix of
+    the protocol's own test): before ``begin``; at GEMM ``k`` for every ``k`` (after ``k``
+    pushes; ``k = world_size - 1`` is the own GEMM, every push issued); before ``wait_all``;
+    inside the reduce (after the waits, before ``done``)."""
+    return [
+        "before_open",
+        *(("gemm", k) for k in range(world_size)),
+        "before_wait_all",
+        "in_reduce",
+    ]
+
+
+def _rs_raise_cases(world_sizes=(2, 3, 4, 8)) -> list:
+    return [
+        pytest.param(
+            p, fail, id=f"P{p}-{fail if isinstance(fail, str) else fail[0] + str(fail[1])}"
+        )
+        for p in world_sizes
+        for fail in _rs_raise_points(p)
+    ]
+
+
+def _rs_boundary(fabric: _Fabric, transports: list[CeReduceScatter], slot: int, fail=None):
+    """One reduce-scatter boundary on every rank, enqueued in rank order as the op body does
+    (``begin``, a push per destination in dest order, the own block into ``own_view``,
+    ``wait_all``, ``partials``, ``done``), then run on the fabric; ``fail`` injects the op's
+    raise (:func:`_rs_raise_points`) and its except path (``reset``), as :func:`_boundary`
+    does. After a plain boundary every destination holds all ``tp`` partials of this boundary
+    in source order, and their fixed-order reduce is the reference chain."""
+    world_size = len(transports)
+    fabric.reported = {}
+    index = next(_SEEDS)
+    ready = transports[0]._ready_channel(slot)
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        point = fail.get(r) if isinstance(fail, dict) else fail
+        try:
+            if point == "before_open":
+                raise RuntimeError("injected before begin")
+            t.begin(slot, _RS_LAYOUT)
+            for k, dst in enumerate(t.dest_order):
+                if point == ("gemm", k):
+                    raise RuntimeError(f"injected at GEMM {k}")
+                t.push(dst, slot, _rs_block(r, dst, index))
+                fabric.pushes[(ready, r, dst)] += 1
+            if point == ("gemm", world_size - 1):
+                raise RuntimeError("injected at the own GEMM")
+            t.own_view(slot).copy_(_rs_block(r, r, index))
+            if point == "before_wait_all":
+                raise RuntimeError("injected before wait_all")
+            t.wait_all(slot)
+            if point == "in_reduce":
+                raise RuntimeError("injected inside the reduce")
+            view = t.partials(slot)
+            assert view.shape == (world_size, _RS_M, _RS_N)
+            assert view.stride() == (t.pool.region_nbytes // 2, _RS_N, 1)
+            t.done(slot)
+        except RuntimeError as e:
+            assert point is not None and str(e).startswith("injected"), e
+            t.reset()
+    fabric.assert_collectives_matched()
+    fabric.run()
+    if fail is None:
+        for r, t in enumerate(transports):
+            region0 = t.pool.region(slot, 0, 0, _RS_LAYOUT.region_nbytes)
+            view = _RS_LAYOUT.partials_view(
+                region0, world_size, region_stride_nbytes=t.pool.region_nbytes
+            )
+            parts = [_rs_block(src, r, index) for src in range(world_size)]
+            for src in range(world_size):
+                assert torch.equal(view[src], parts[src]), (r, src)
+            out = torch.empty((_RS_M, _RS_N), dtype=torch.bfloat16)
+            tsr.fixed_order_reduce_bf16(view, None, out)
+            assert torch.equal(out, tsr.reference_fixed_order_reduce(parts)), r
+
+
+def _assert_rs_balanced(fabric: _Fabric, transports: list[CeReduceScatter]) -> None:
+    """The reduce-scatter's invariant after every completed boundary (``done`` or ``reset``):
+    no slot in flight, no stream with a pending op, every rank at the same boundary and use
+    counts, and per slot and ordered pair ``p -> d``: the ready flag clear with ``puts =
+    waits`` = the pushes ``p`` issued to ``d`` on the slot (``uses`` unless a boundary was cut
+    short before that push); the consumed credit present exactly once on a slot that was used
+    (``puts = uses = waits + 1``), none before its first use; no resync round left unmatched."""
+    fabric.assert_collectives_matched()
+    assert not any(any(t._in_flight) for t in transports)
+    assert all(s.done == len(s.ops) for s in fabric.streams)
+    assert len({t._boundaries for t in transports}) == 1
+    assert len({tuple(t._uses) for t in transports}) == 1
+    world = fabric.world_size
+    for slot in range(transports[0].slots):
+        ready = transports[0]._ready_channel(slot)
+        consumed = transports[0]._consumed_channel(slot)
+        uses = transports[0]._uses[slot]
+        for p in range(world):
+            for d in range(world):
+                if p == d:
+                    continue
+                key = (ready, p, d)
+                issued = fabric.pushes[key]
+                assert issued <= uses, ("pushes", key, uses)
+                assert fabric.flags.get(key, 0) == 0, ("ready flag set", key)
+                assert fabric.puts[key] == fabric.waits[key] == issued, key
+                key = (consumed, p, d)
+                credit = int(uses > 0)
+                assert fabric.flags.get(key, 0) == credit, ("credit", key, uses)
+                assert fabric.puts[key] == uses and fabric.waits[key] == uses - credit, key
+
+
+@pytest.mark.parametrize("per_peer_streams", [True, False], ids=["per-peer", "one-stream"])
+@pytest.mark.parametrize("slots", [1, 2])
+@pytest.mark.parametrize("world_size", [2, 3, 4, 8])
+def test_rs_boundaries_keep_the_signals_balanced(world_size, slots, per_peer_streams, monkeypatch):
+    """Plain boundaries (alternating the slots when there are two): the first use of each slot
+    skips the consumed wait, every later one waits it; the ready flags balance within each
+    boundary, the consumed credits across them, no collective runs, every destination reduces
+    the boundary's own partials; drain between forwards and a covered reserve touch no flag."""
+    fabric = _rs_fabric(world_size, monkeypatch)
+    transports = _reduce_scatters(fabric, slots, per_peer_streams)
+    assert all(len(t.streams) == (world_size - 1 if per_peer_streams else 1) for t in transports)
+    for index in range(3 * slots):
+        _rs_boundary(fabric, transports, index % slots)
+        _assert_rs_balanced(fabric, transports)
+    assert all(t._boundaries == 3 * slots and t._uses == [3] * slots for t in transports)
+    assert fabric.resyncs == 0
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        t.drain()
+        assert t.reserve(_RS_LAYOUT) is False
+    fabric.run()
+    _assert_rs_balanced(fabric, transports)
+
+
+def test_rs_boundary_enqueues_the_protocol_sequence(monkeypatch):
+    """What one boundary enqueues, on rank 0 of 3 (dest order 2, 1; wait order 1, 2) with one
+    copy stream per destination: each destination's stream forks once and carries the consumed
+    wait (not on the slot's first use) and the ready put behind the copy; the current stream
+    waits each source's ready flag in wait order, joins the two forked streams and puts the
+    consumed credit to every destination in dest order. Channels: ready(0) = 0, consumed(0) =
+    1."""
+    fabric = _rs_fabric(3, monkeypatch)
+    transports = _reduce_scatters(fabric)
+    t = transports[0]
+    main, to1, to2 = fabric.main[0], t.streams.stream(1), t.streams.stream(2)
+    assert to1 is not to2
+
+    def kinds(stream):
+        return ["event" if op[0] == "event" else op for op in stream.ops]
+
+    _rs_boundary(fabric, transports, 0)  # the first use of the slot: no consumed waits
+    assert kinds(to2) == ["event", ("put", 0, 0, 2)]
+    assert kinds(to1) == ["event", ("put", 0, 0, 1)]
+    assert kinds(main) == [
+        ("wait", 0, 1, 0),
+        ("wait", 0, 2, 0),
+        "event",
+        "event",
+        ("put", 1, 0, 2),
+        ("put", 1, 0, 1),
+    ]
+    n1, n2, n_main = len(to1.ops), len(to2.ops), len(main.ops)
+    _rs_boundary(fabric, transports, 0)  # the slot again: each destination's credit first
+    assert kinds(to2)[n2:] == ["event", ("wait", 1, 2, 0), ("put", 0, 0, 2)]
+    assert kinds(to1)[n1:] == ["event", ("wait", 1, 1, 0), ("put", 0, 0, 1)]
+    assert kinds(main)[n_main:] == [
+        ("wait", 0, 1, 0),
+        ("wait", 0, 2, 0),
+        "event",
+        "event",
+        ("put", 1, 0, 2),
+        ("put", 1, 0, 1),
+    ]
+    _assert_rs_balanced(fabric, transports)
+
+
+@pytest.mark.parametrize("warm", [False, True], ids=["cold", "warm"])
+@pytest.mark.parametrize("slots", [1, 2])
+@pytest.mark.parametrize("world_size,fail", _rs_raise_cases())
+def test_rs_reset_after_a_rank_symmetric_raise_keeps_the_signals_balanced(
+    world_size, fail, slots, warm, monkeypatch
+):
+    """The reduce-scatter on the base's recovery: a rank-symmetric raise at every point of a
+    boundary, on a slot's first use (cold) and after good boundaries on every slot (warm), at
+    both slot counts: ``reset`` completes the boundary like ``done`` (the balance invariant
+    holds right after it), the recovered slot never re-enters first use, no device would trap,
+    the next eager ``begin`` runs the resync collective exactly once per rank, and the
+    following boundaries are plain ones whose reduce is the reference chain."""
+    fabric = _rs_fabric(world_size, monkeypatch)
+    transports = _reduce_scatters(fabric, slots)
+    index = 0
+    for _ in range(2 * slots if warm else 0):
+        _rs_boundary(fabric, transports, index % slots)
+        _assert_rs_balanced(fabric, transports)
+        index += 1
+    failed_slot = index % slots
+    before = transports[0]._boundaries
+    uses_before = transports[0]._uses[failed_slot]
+    _rs_boundary(fabric, transports, failed_slot, fail=fail)
+    _assert_rs_balanced(fabric, transports)
+    completed = fail != "before_open"  # nothing was in flight: reset() had nothing to release
+    assert all(t._boundaries == before + int(completed) for t in transports)
+    assert all(t._uses[failed_slot] == uses_before + int(completed) for t in transports)
+    assert all(t._needs_resync for t in transports)
+    index += 1
+    for _ in range(2 * slots):
+        _rs_boundary(fabric, transports, index % slots)
+        _assert_rs_balanced(fabric, transports)
+        index += 1
+    assert fabric.resyncs == world_size  # one gather per rank, at the first begin after the reset
+    assert not any(t._needs_resync for t in transports)
+
+
+@pytest.mark.parametrize("world_size,k", [(2, 0), (3, 1), (4, 2), (8, 4)])
+def test_rs_recovers_from_a_raise_inside_the_push_loop(world_size, k, monkeypatch):
+    """A rank-symmetric raise at GEMM ``k``, after ``k`` pushes: the recovery the
+    reduce-scatter's own transport already had (its ``begin`` preceded the loop and its
+    ``reset`` trimmed the owed ready waits to ``wait_order[:k]``), now through the base's
+    generic arrival rule (``_arrived`` mirrors the push order per channel) and the base's
+    release, in this order on the current stream: the consumed credits of the destinations
+    never pushed to (the protocol's step before the base), the ready flags that did arrive,
+    the join of exactly the ``k`` forked copy streams, the re-credit of every destination,
+    then the eager join of every copy stream; the next boundary on the slot is a plain one
+    after one resync per rank."""
+    fabric = _rs_fabric(world_size, monkeypatch)
+    transports = _reduce_scatters(fabric)
+    _rs_boundary(fabric, transports, 0)  # warm: the slot past its first use
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        t.begin(0, _RS_LAYOUT)
+        for dst in t.dest_order[:k]:
+            t.push(dst, 0, _rs_block(r, dst, 99))
+            fabric.pushes[(0, r, dst)] += 1
+        assert t._in_flight[0] and t._pushed_to[0] == {(d, 0) for d in t.dest_order[:k]}
+        assert t._pending[0] == {(s, 0) for s in t.wait_order}
+        assert t._arrived(0) == {(s, 0) for s in t.wait_order[:k]}
+        start = len(fabric.main[r].ops)
+        t.reset()
+        kinds = [op[0] if op[0] == "event" else op for op in fabric.main[r].ops[start:]]
+        assert kinds == [
+            *(("wait", 1, d, r) for d in t.dest_order[k:]),
+            *(("wait", 0, s, r) for s in sorted(t.wait_order[:k])),
+            *(["event"] * k),
+            *(("put", 1, r, d) for d in t.dest_order),
+            *(["event"] * (world_size - 1)),  # join_all_eager: every copy stream once more
+        ]
+        assert not t._in_flight[0] and t._uses[0] == 2 and t._needs_resync
+    fabric.run()
+    _assert_rs_balanced(fabric, transports)
+    _rs_boundary(fabric, transports, 0)
+    _assert_rs_balanced(fabric, transports)
+    assert fabric.resyncs == world_size
+
+
+def test_rs_capture_mark_is_set_when_the_captured_boundary_completes(monkeypatch):
+    """NEW on the base (the reduce-scatter's own transport marked itself captured at
+    ``begin``): a slot's first use under capture is refused before the slot opens; a boundary
+    that raises under capture leaves no mark (its capture is discarded; ``reset`` joins only
+    the forked copy streams); a captured boundary that completes marks the transport, after
+    which a growing reserve is refused and a covered one is not."""
+    fabric = _rs_fabric(3, monkeypatch)
+    transports = _reduce_scatters(fabric)
+    fabric.rank = 0
+    fabric.capturing = True
+    with pytest.raises(RuntimeError, match="first use of slot 0 under CUDA-graph capture"):
+        transports[0].begin(0, _RS_LAYOUT)
+    assert not transports[0]._in_flight[0] and transports[0]._capturing == [False]
+    fabric.capturing = False
+    _rs_boundary(fabric, transports, 0)  # the eager first use
+    fabric.capturing = True
+    _rs_boundary(fabric, transports, 0, fail=("gemm", 1))  # raised under capture, one push in
+    _assert_rs_balanced(fabric, transports)
+    assert all(not t._captured and not any(t._capturing) and t._needs_resync for t in transports)
+    fabric.capturing = False
+    _rs_boundary(fabric, transports, 0)  # eager: the resync runs, the latch clears
+    assert fabric.resyncs == 3 and all(not t._captured for t in transports)
+    fabric.capturing = True
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        t.begin(0, _RS_LAYOUT)
+        assert t._capturing == [True] and not t._captured  # noted, not yet promoted
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        for dst in t.dest_order:
+            t.push(dst, 0, _rs_block(r, dst, 7))
+            fabric.pushes[(0, r, dst)] += 1
+        t.own_view(0).copy_(_rs_block(r, r, 7))
+        t.wait_all(0)
+        t.partials(0)
+        t.done(0)
+        assert t._captured and t._capturing == [False]  # promoted on completion
+    fabric.run()
+    _assert_rs_balanced(fabric, transports)
+    fabric.capturing = False
+    for r, t in enumerate(transports):
+        fabric.rank = r
+        assert t.reserve(_RS_LAYOUT) is False  # covered: allowed after the capture
+        with pytest.raises(RuntimeError, match="would grow after a CUDA graph"):
+            t.reserve(Bf16RowsRegionLayout(2 * _RS_M, _RS_N))
+        assert t.pool.generation == 1
+    _rs_boundary(fabric, transports, 0)
+    assert all(t._captured for t in transports)  # stays: a graph holds the addresses
+
+
+def test_rs_first_eager_begin_after_a_reset_resyncs_once(recorder, monkeypatch):
+    """NEW on the base: after a failed boundary the first eager ``begin`` on each rank
+    all-gathers the boundary counts once (a warning names the gather first), a latched
+    transport refuses ``begin`` under capture with the slot idle, a disagreement raises
+    ``CeResyncError`` out of ``begin`` with the slot idle and the latch kept, and nothing runs
+    on the hot path afterwards."""
+    fabric = _rs_fabric(3, monkeypatch)
+    transports = _reduce_scatters(fabric)
+    _rs_boundary(fabric, transports, 0)
+    _rs_boundary(fabric, transports, 0, fail="in_reduce")
+    assert all(t._needs_resync for t in transports) and fabric.resyncs == 0
+    fabric.rank = 0
+    fabric.capturing = True
+    with pytest.raises(RuntimeError, match="run one eager call before capturing"):
+        transports[0].begin(0, _RS_LAYOUT)
+    assert not transports[0]._in_flight[0] and fabric.resyncs == 0
+    fabric.capturing = False
+    fabric.counts_override = {2: 7}
+    with pytest.raises(CeResyncError, match="rank 0: 2, rank 1: 2, rank 2: 7"):
+        transports[0].begin(0, _RS_LAYOUT)
+    assert not transports[0]._in_flight[0] and transports[0]._needs_resync
+    assert fabric.resyncs == 1 and transports[0]._uses == [2]
+    fabric.counts_override = {}
+    _rs_boundary(fabric, transports, 0)
+    _assert_rs_balanced(fabric, transports)
+    assert fabric.resyncs == 4 and not any(t._needs_resync for t in transports)
+    assert len(recorder.warnings) == 4 and all(
+        w.startswith(
+            "CeReduceScatter[fake3]: resync after a failed boundary (this rank completed 2)"
+        )
+        for w in recorder.warnings
+    )
+    _rs_boundary(fabric, transports, 0)
+    _assert_rs_balanced(fabric, transports)
     assert fabric.resyncs == 4  # one collective per recovery, nothing on the hot path
 
 

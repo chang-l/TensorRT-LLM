@@ -1697,7 +1697,7 @@ def _logic_ce_reduce_scatter_op(rank, world_size, device):
         for i in range(24):
             if rank == i % world_size:
                 dst = transport.dest_order[i % len(transport.dest_order)]
-                with torch.cuda.stream(transport.side_stream(dst)):
+                with torch.cuda.stream(transport.streams.stream(dst)):
                     torch.cuda._sleep(2_000_000)
             _, _, raw, _, c5 = boundary(row, k_local, plan, 5 + k_local + 31 * rank, True)
             if first is None:

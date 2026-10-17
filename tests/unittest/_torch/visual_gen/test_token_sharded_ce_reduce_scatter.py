@@ -32,12 +32,14 @@ import math
 import sys
 import traceback
 from collections import Counter
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from tensorrt_llm._torch.distributed import ce_protocol
 from tensorrt_llm._torch.distributed.symm_mem_pool import PoolLayout
 from tensorrt_llm._torch.modules.linear import Linear
 from tensorrt_llm._torch.visual_gen.parallel import token_sharded_ce_reduce_scatter as tsr
@@ -486,7 +488,7 @@ class _Fabric:
 
     # -- the torch.cuda surface the transport uses --
 
-    def Stream(self, device=None) -> _FakeStream:  # noqa: N802 (torch.cuda.Stream)
+    def Stream(self, device=None, priority=0) -> _FakeStream:  # noqa: N802 (torch.cuda.Stream)
         n = sum(1 for s in self.streams if s.rank == self.rank) - 1
         return self._new_stream(self.rank, f"rank{self.rank}/side{n}")
 
@@ -511,6 +513,11 @@ class _Fabric:
     def install(self, monkeypatch) -> None:
         for name in ("Stream", "Event", "current_stream", "stream", "is_current_stream_capturing"):
             monkeypatch.setattr(torch.cuda, name, getattr(self, name))
+        # The base's resync after a reset: every rank reset in a rank-symmetric case, so the
+        # counts agree (the base's own test covers the disagreement).
+        monkeypatch.setattr(
+            ce_protocol, "_gather_boundary_counts", lambda group, count: [count] * self.tp
+        )
 
     # -- the pads --
 
@@ -568,11 +575,23 @@ class _FakePool:
         self.fabric = fabric
         self.rank = rank
         self.world_size = fabric.tp
+        self.align = DEFAULT_ALIGN
+        self.channels = 4  # ready and consumed for the two slots the tests use
+        self.group = None  # the resync gather is the fabric's
+        self.group_name = f"fake{fabric.tp}"
         self._layout: PoolLayout | None = None
+
+    @property
+    def reserved(self) -> bool:
+        return self._layout is not None
 
     @property
     def nbytes(self) -> int:
         return self._layout.nbytes if self._layout else 0
+
+    @property
+    def slot_nbytes(self) -> int:
+        return self._layout.slot_nbytes if self._layout else 0
 
     @property
     def slots(self) -> int:
@@ -880,7 +899,7 @@ def _state_logic(rank, world_size, device):
     group = dist.group.WORLD
     name = group.group_name
     recorder = _Recorder()
-    tsr.logger = recorder
+    tsr.logger = ce_protocol.logger = recorder  # the probe's one warning is the base's
     with pytest.raises(ValueError, match="process group; got None"):
         CeReduceScatterState(None, name)
     with pytest.raises(ValueError, match="timeout_ms >= 0"):
@@ -912,9 +931,34 @@ def _state_logic(rank, world_size, device):
     state.begin_forward()
     assert state.next_slot() == 0
     # The op refuses (rank-symmetrically) when the state is registered but not effective.
-    x, sf, w, ws, bias = _op_inputs(plan.padded_rows, 256, 128, rank == 0)
+    x, sf, w, ws, bias = _op_inputs(plan.padded_rows, 256, 128, True)  # the bias on every rank
     with pytest.raises(RuntimeError, match="not effective"):
         _OP(x, sf, w, ws, bias, name, rank, world_size, 1, 8, plan.padded_seq_len)
+
+    # A resync disagreement raised by the transport (CeResyncError: the ranks' boundary counts
+    # differ after a failed boundary) takes the group off the protocol, CeState.disable:
+    # effective False, the reason, the error propagated (the state's one warning was already
+    # given by the probe); the adapters' next call reads effective and reduce-scatters with
+    # NCCL. Nothing was opened, so reset() must not run.
+    def _raise_resync(*args):
+        raise ce_protocol.CeResyncError("boundary counts differ across the ranks: [1, 2]")
+
+    def _no_reset():
+        raise AssertionError("reset() must not run for a resync disagreement")
+
+    state.effective = True
+    state.transport = SimpleNamespace(
+        tp_size=world_size,
+        rank=rank,
+        covers=lambda layout: True,
+        begin=_raise_resync,
+        reset=_no_reset,
+    )
+    with pytest.raises(ce_protocol.CeResyncError, match="boundary counts differ"):
+        _OP(x, sf, w, ws, bias, name, rank, world_size, 1, 8, plan.padded_seq_len)
+    assert not state.effective and "boundary counts differ" in state.reason
+    assert len(recorder.warnings) == 1  # one warning per state: the probe's
+    state.transport = None
     release_rs_state(name)
     with pytest.raises(KeyError):
         get_rs_state(name)

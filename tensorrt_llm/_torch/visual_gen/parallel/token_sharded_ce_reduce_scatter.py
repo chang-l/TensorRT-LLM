@@ -74,11 +74,12 @@ three states:
   push on ``s``).
 
 ``done`` and ``reset`` both take a slot from IN FLIGHT to IDLE through the same four steps
-(``CeReduceScatter._release``): (i) wait ``consumed(s)`` from every destination NOT pushed to
-in this boundary, unless FRESH -- the wait the un-issued push would have done (a no-op from
-``done``, which requires every push); (ii) wait ``ready(s)`` from every source that pushed
-(``wait_order[:k]``) and that ``wait_all`` did not wait; (iii) join the side streams; (iv) put
-``consumed(s)`` to every destination. Invariant (asserted by the CPU test on a fake pool):
+(``CeReduceScatter._release`` around the base's release): (i) wait ``consumed(s)`` from every
+destination NOT pushed to in this boundary, unless FRESH -- the wait the un-issued push would
+have done (a no-op from ``done``, which requires every push); (ii) wait ``ready(s)`` from every
+source that pushed (``wait_order[:k]``) and that ``wait_all`` did not wait; (iii) join the
+forked side streams; (iv) put ``consumed(s)`` to every destination. Invariant (asserted by the
+CPU test on a fake pool):
 after every completed boundary, for every slot ``s`` and ordered pair ``p -> d``: the
 ``ready(s)`` flag is clear and ``puts(ready) = waits(ready)`` = the number of boundaries on
 ``s`` in which ``p`` issued its push to ``d`` (``uses[s]`` unless a boundary was cut short
@@ -88,6 +89,12 @@ next boundary's producer side (one ``consumed`` wait per push) and consumer side
 ``ready`` wait per source) each find exactly one unconsumed flag per wait, whatever completed
 the previous boundary. A recovery never re-enters FRESH: ``uses[s]`` only grows, so a captured
 graph (whose pushes wait ``consumed``) stays replayable after one.
+
+The boundary bookkeeping is :class:`~tensorrt_llm._torch.distributed.ce_protocol.CeTransport`'s
+(``open`` / ``mark_pushed`` / ``wait_ready`` / ``done``, the copy streams, the view cache, the
+reserve rules, ``reset`` and the resync after it); this module holds the layout, the channels,
+the schedule and the ``consumed`` credit, which is the reduce-scatter's own as it lives across
+boundaries (steps (i) and (iv) above, around the base's release).
 
 Streams and CUDA graphs
 -----------------------
@@ -134,7 +141,10 @@ until the timeout traps their CUDA context: a "device-side trap" on three of fou
 another rank raised; read that rank's traceback. Shape errors in the op body are checked
 against the plan ints and the weight shape only, which are identical on every rank, so they
 raise on every rank together; a failed op call resets the transport so the next ``begin`` does
-not raise. :meth:`CeReduceScatter.reset` completes the failed boundary's protocol exactly as
+not raise, and the first eager boundary after it agrees the ranks' boundary counts once
+(:class:`~tensorrt_llm._torch.distributed.ce_protocol.CeResyncError` when they differ, which the
+op body turns into ``CeReduceScatterState.disable``: the group continues on NCCL).
+:meth:`CeReduceScatter.reset` completes the failed boundary's protocol exactly as
 ``done`` would have (the state machine above): a rank-symmetric raise after ``k`` of the
 ``tp - 1`` GEMM + push steps (a DeepGEMM failure, say) means every rank pushed to
 ``dest_order[:k]`` and received exactly the pushes of ``wait_order[:k]``; the reset waits those
@@ -156,12 +166,8 @@ import torch.distributed as dist
 from tensorrt_llm.logger import logger
 from tensorrt_llm.math_utils import pad_up
 
-from ...distributed.symm_mem_pool import (
-    DEFAULT_ALIGN,
-    DEFAULT_TIMEOUT_MS,
-    SymmMemPool,
-    probe_symmetric_memory,
-)
+from ...distributed.ce_protocol import CeResyncError, CeState, CeTransport, _is_capturing
+from ...distributed.symm_mem_pool import DEFAULT_ALIGN, DEFAULT_TIMEOUT_MS, SymmMemPool
 from .token_sharded_ce_gather import (
     fp8_block_gemm_out,
     mn_major_scales,
@@ -492,21 +498,23 @@ def validate_fp8_block_row_consumer(linear: object) -> None:
 # =============================================================================
 
 
-class CeReduceScatter:
+class CeReduceScatter(CeTransport):
     """Per-destination copy-engine reduce-scatter over a ``SymmMemPool`` (module docstring).
 
-    Owns the pool for its lifetime (data channels ``0 .. 2 * slots - 1``). Per boundary:
-    :meth:`begin`, a GEMM + :meth:`push` per destination in :attr:`dest_order`, the own GEMM
-    into :meth:`own_view`, :meth:`wait_all`, the reduce over :meth:`partials`, :meth:`done`.
-    :meth:`reserve` sizes the pool eagerly and collectively.
+    The boundary bookkeeping, the copy streams, the view cache, the reserve rules and the
+    recovery path are :class:`CeTransport`'s; this class holds the reduce-scatter's layout,
+    channels and schedule. Owns the pool for its lifetime (data channels ``0 .. 2 * slots - 1``).
+    Per boundary: :meth:`begin`, a GEMM + :meth:`push` per destination in :attr:`dest_order`,
+    the own GEMM into :meth:`own_view`, :meth:`wait_all`, the reduce over :meth:`partials`,
+    :meth:`done`. :meth:`reserve` sizes the pool eagerly and collectively.
 
     Args:
         pool: The TP group's reduce-scatter pool (its ``signal`` / ``wait`` carry the timeout).
         tp_size: Ranks in the TP group.
         rank: This process's rank in the group.
-        device: The CUDA device the side streams run on.
+        device: The CUDA device the copy streams run on.
         slots: Slots to alternate over.
-        per_peer_streams: One side stream per destination (default) or one for all.
+        per_peer_streams: One copy stream per destination (default) or one for all.
     """
 
     def __init__(
@@ -519,43 +527,31 @@ class CeReduceScatter:
         slots: int = SLOTS,
         per_peer_streams: bool = True,
     ) -> None:
-        if tp_size < 2 or not 0 <= rank < tp_size:
-            raise ValueError(
-                f"CeReduceScatter needs tp_size >= 2 and 0 <= rank < tp_size (got {rank}/{tp_size})."
-            )
-        if slots < 1:
-            raise ValueError(f"CeReduceScatter needs slots >= 1 (got {slots}).")
-        self.pool = pool
-        self.tp_size = tp_size
-        self.rank = rank
-        self.device = device
-        self.slots = slots
-        self.per_peer_streams = per_peer_streams
         self.dest_order: tuple[int, ...] = tuple((rank - i) % tp_size for i in range(1, tp_size))
         """Destinations in push order ``me - 1, me - 2, ...``: at step ``i`` every rank targets
         a distinct destination, whose ``wait_order`` (``me + 1, me + 2, ...``) is the arrival
         order."""
         self.wait_order: tuple[int, ...] = tuple((rank + i) % tp_size for i in range(1, tp_size))
-        """Remote sources in the order their ready flags are waited: ``me + 1, me + 2, ...``."""
-        n_streams = tp_size - 1 if per_peer_streams else 1
-        self._streams = [torch.cuda.Stream(device=device) for _ in range(n_streams)]
-        self._stream_of: dict[int, torch.cuda.Stream] = {
-            dst: self._streams[i if per_peer_streams else 0]
-            for i, dst in enumerate(self.dest_order)
-        }
+        """Remote sources in the order their ready flags are waited, ``me + 1, me + 2, ...``,
+        which is the order their pushes reach this rank (the base's ``arrival_order``)."""
+        super().__init__(
+            pool,
+            tp_size,
+            rank,
+            device,
+            slots=slots,
+            arrival_order=self.wait_order,
+            per_peer_streams=per_peer_streams,
+        )
         self._layout: list[Bf16RowsRegionLayout | None] = [None] * slots
-        self._own_views: dict[int, torch.Tensor] = {}
-        self._partials_views: dict[int, torch.Tensor] = {}
-        self._peer_views: dict[tuple[int, int], torch.Tensor] = {}
         self._uses = [0] * slots
-        self._in_flight = [False] * slots
-        self._pushed: list[list[torch.cuda.Event]] = [[] for _ in range(slots)]
-        self._pushed_to: list[set[int]] = [set() for _ in range(slots)]
-        self._ready_pending: list[set[int]] = [set() for _ in range(slots)]
-        self._slot_nbytes = 0
-        self._captured = False  # a CUDA graph holds the pool's addresses: no growth after it
 
-    # --- channels / streams / capacity ------------------------------------------------------
+    # --- channels / capacity ----------------------------------------------------------------
+
+    @property
+    def tp_size(self) -> int:
+        """``world_size``, in the TP vocabulary of the op body."""
+        return self.world_size
 
     def _ready_channel(self, slot: int) -> int:
         return slot
@@ -571,18 +567,11 @@ class CeReduceScatter:
     @property
     def slot_nbytes(self) -> int:
         """Bytes per slot of the current reservation (0 before :meth:`reserve`)."""
-        return self._slot_nbytes
-
-    def side_stream(self, dst: int) -> torch.cuda.Stream:
-        """The side stream that carries the pushes to destination ``dst`` (tests inject delays
-        on it to perturb arrival order)."""
-        if dst not in self._stream_of:
-            raise ValueError(f"destination {dst} is not a peer of rank {self.rank}/{self.tp_size}.")
-        return self._stream_of[dst]
+        return self.pool.slot_nbytes
 
     def covers(self, layout: Bf16RowsRegionLayout) -> bool:
         """Whether the current reservation holds ``layout`` on every slot."""
-        return self._slot_nbytes >= layout.slot_nbytes(self.tp_size)
+        return self._covers(layout.slot_nbytes(self.world_size), self.slots)
 
     def reserve(self, layout: Bf16RowsRegionLayout) -> bool:
         """Size the pool for ``layout`` on :attr:`slots` slots (collective, grow-only).
@@ -593,77 +582,42 @@ class CeReduceScatter:
         (re)allocated: the signal pad is then zeroed, so the protocol restarts from "first use"
         and the cached views are dropped.
         """
-        if any(self._in_flight):
-            raise RuntimeError(
-                "CeReduceScatter.reserve with a boundary in flight; call done() first."
-            )
-        if not self.covers(layout):
-            if self._captured:
-                raise RuntimeError(
-                    f"CeReduceScatter.reserve: the symmetric pool would grow after a CUDA graph "
-                    f"captured its buffers (the pool holds {self._slot_nbytes} bytes per slot, "
-                    f"the layout needs {layout.slot_nbytes(self.tp_size)}); warm up the largest "
-                    "token shape first, or run the warm-up with capture disabled before "
-                    "capturing."
-                )
-            # Drop the views into the current allocation first so the pool can free it before
-            # allocating the larger one (otherwise both are mapped at once).
-            self._drop_views()
-        realloc = self.pool.reserve(layout.slot_nbytes(self.tp_size), self.slots, self.min_channels)
+        realloc = self._reserve(layout.slot_nbytes(self.world_size), self.slots, self.min_channels)
         if realloc:
             self._uses = [0] * self.slots
-            self._drop_views()
-        self._slot_nbytes = self.pool.nbytes // self.pool.slots
-        if self._slot_nbytes // self.tp_size < layout.region_nbytes or self.pool.slots < self.slots:
+        if (
+            self.slot_nbytes // self.world_size < layout.region_nbytes
+            or self.pool.slots < self.slots
+        ):
             raise RuntimeError(
-                f"CeReduceScatter.reserve: the pool holds {self.pool.slots} x {self._slot_nbytes} "
-                f"bytes after reserve(); need {self.slots} x {layout.slot_nbytes(self.tp_size)}."
+                f"CeReduceScatter.reserve: the pool holds {self.pool.slots} x {self.slot_nbytes} "
+                f"bytes after reserve(); need {self.slots} x {layout.slot_nbytes(self.world_size)}."
             )
         return realloc
-
-    def _drop_views(self) -> None:
-        # Views into the pool's allocation are valid for one allocation and one slot layout.
-        self._layout = [None] * self.slots
-        self._own_views.clear()
-        self._partials_views.clear()
-        self._peer_views.clear()
-
-    def _check_slot(self, slot: int) -> None:
-        if not 0 <= slot < self.slots:
-            raise ValueError(f"slot {slot} out of range (transport has {self.slots} slots).")
-
-    def _require_in_flight(self, slot: int, op: str) -> None:
-        self._check_slot(slot)
-        if not self._in_flight[slot]:
-            raise RuntimeError(
-                f"CeReduceScatter.{op}(slot={slot}) needs a begin({slot}) in flight."
-            )
 
     def _bind_layout(self, slot: int, layout: Bf16RowsRegionLayout) -> None:
         # Region views are valid for the layout a slot was begun with: drop that slot's cache
         # when its layout changes; another slot (possibly in flight) keeps its own.
         if layout != self._layout[slot]:
             self._layout[slot] = layout
-            self._own_views.pop(slot, None)
-            self._partials_views.pop(slot, None)
-            for key in [key for key in self._peer_views if key[0] == slot]:
-                del self._peer_views[key]
+            self._drop_views(slot)
 
     def _peer_view(self, slot: int, peer: int) -> torch.Tensor:
         """MY region's payload span in ``peer``'s slot: what my push writes (cached)."""
-        key = (slot, peer)
-        view = self._peer_views.get(key)
-        if view is None:
-            layout = self._layout[slot]
-            view = layout.producer_view(self.pool.peer_region(peer, slot, 0, layout.region_nbytes))
-            self._peer_views[key] = view
-        return view
+        layout = self._layout[slot]
+        return self.view(
+            (slot, "peer", peer),
+            lambda: layout.producer_view(
+                self.pool.peer_region(peer, slot, 0, layout.region_nbytes)
+            ),
+        )
 
     # --- the boundary -----------------------------------------------------------------------
 
     def begin(self, slot: int, layout: Bf16RowsRegionLayout) -> None:
         """Open a boundary on slot ``slot`` for ``layout`` (the plan's ``m`` x the consumer's
-        ``N``): bind the layout, start the push bookkeeping. Enqueues nothing."""
+        ``N``): bind the layout, open the slot with the ready flags it owes. Enqueues nothing;
+        the host checks come first, so a refusal leaves the slot idle."""
         self._check_slot(slot)
         if self._in_flight[slot]:
             raise RuntimeError(
@@ -672,40 +626,32 @@ class CeReduceScatter:
             )
         if not self.covers(layout):
             raise RuntimeError(
-                f"CeReduceScatter.begin: the pool holds {self._slot_nbytes} bytes per slot, a "
+                f"CeReduceScatter.begin: the pool holds {self.slot_nbytes} bytes per slot, a "
                 f"[{layout.rows}, {layout.cols}] boundary needs "
-                f"{layout.slot_nbytes(self.tp_size)}; reserve() eagerly for the largest boundary "
+                f"{layout.slot_nbytes(self.world_size)}; reserve() eagerly for the largest boundary "
                 "first."
             )
-        capturing = torch.cuda.is_current_stream_capturing()
-        if self._uses[slot] == 0 and capturing:
+        if self._uses[slot] == 0 and _is_capturing():
             raise RuntimeError(
                 f"CeReduceScatter.begin: first use of slot {slot} under CUDA-graph capture (its "
                 f"consumed wait would be missing from every replay); run at least {self.slots} "
                 "eager boundaries after reserving before capturing."
             )
-        if capturing:
-            self._captured = True
         self._bind_layout(slot, layout)
-        self._pushed[slot] = []
-        self._pushed_to[slot] = set()
-        self._ready_pending[slot] = set(self.wait_order)
-        self._in_flight[slot] = True
+        ready = self._ready_channel(slot)
+        self.open(slot, [(src, ready) for src in self.wait_order])
 
     def push(self, dst: int, slot: int, block: torch.Tensor) -> None:
         """Push ``block`` (this rank's K-partial of destination ``dst``'s rows, a contiguous
         bf16 ``[m, N]``) into ``dst``'s slot ``slot`` and raise its ready flag.
 
-        Forks ``dst``'s side stream from the current stream behind the GEMM that produced
+        Forks ``dst``'s copy stream from the current stream behind the GEMM that produced
         ``block``; enqueues only. Each destination exactly once per boundary, in any order.
         """
         self._require_in_flight(slot, "push")
-        if dst not in self._stream_of:
-            raise ValueError(
-                f"CeReduceScatter.push: destination {dst} is not a peer of rank "
-                f"{self.rank}/{self.tp_size}."
-            )
-        if dst in self._pushed_to[slot]:
+        self._check_peer(dst, "push")
+        ready = self._ready_channel(slot)
+        if (dst, ready) in self._pushed_to[slot]:
             raise RuntimeError(
                 f"CeReduceScatter.push(dst={dst}, slot={slot}) twice in one boundary: the peer "
                 "would see a second ready flag."
@@ -722,44 +668,37 @@ class CeReduceScatter:
             )
         # The destination's view is the last host-side raise point (a cache miss carves it
         # from the pool): resolve it before enqueuing anything, so on every exit of this method
-        # `dst in _pushed_to` <=> 'this push's consumed wait is on dst's side stream' -- the
-        # equivalence _release step (i) relies on to wait that flag exactly once.
+        # `(dst, ready) in _pushed_to` <=> 'this push's consumed wait is on dst's copy stream'
+        # -- the equivalence _release step (i) relies on to wait that flag exactly once.
         view = self._peer_view(slot, dst)
         payload = block.view(torch.uint8).view(-1)
         fork = torch.cuda.Event()
         fork.record(torch.cuda.current_stream())
-        stream = self._stream_of[dst]
-        stream.wait_event(fork)
-        with torch.cuda.stream(stream):
+        with torch.cuda.stream(self.streams.fork(dst, fork)):
             if self._uses[slot] > 0:
                 self.pool.wait(dst, self._consumed_channel(slot))
             view.copy_(payload)
-            self.pool.signal(dst, self._ready_channel(slot))
-            pushed = torch.cuda.Event()
-            pushed.record(stream)
-        self._pushed[slot].append(pushed)
-        self._pushed_to[slot].add(dst)
+            self.mark_pushed(slot, dst, ready)
 
     def own_view(self, slot: int) -> torch.Tensor:
         """Region ``rank`` of MY slot as the bf16 ``[m, N]`` the own block's GEMM writes (only
         this rank ever writes it, so no peer races it)."""
         self._require_in_flight(slot, "own_view")
-        view = self._own_views.get(slot)
-        if view is None:
-            layout = self._layout[slot]
-            region = self.pool.region(slot, self.rank, 0, layout.region_nbytes)
-            view = layout.consumer_view(region)
-            self._own_views[slot] = view
-        return view
+        layout = self._layout[slot]
+        return self.view(
+            (slot, "own"),
+            lambda: layout.consumer_view(
+                self.pool.region(slot, self.rank, 0, layout.region_nbytes)
+            ),
+        )
 
     def wait_all(self, slot: int) -> None:
         """Make the current stream wait for every remote source's ready flag (in
         :attr:`wait_order`); after it the slot holds all ``tp`` partials."""
         self._require_in_flight(slot, "wait_all")
+        ready = self._ready_channel(slot)
         for src in self.wait_order:
-            if src in self._ready_pending[slot]:
-                self.pool.wait(src, self._ready_channel(slot))
-                self._ready_pending[slot].discard(src)
+            self.wait_ready(slot, src, ready)
 
     def partials(self, slot: int) -> torch.Tensor:
         """The slot's ``[tp, m, N]`` bf16 view in source-rank order (strides
@@ -772,102 +711,59 @@ class CeReduceScatter:
         than this boundary's layout alone would carve them.
         """
         self._require_in_flight(slot, "partials")
-        view = self._partials_views.get(slot)
-        if view is None:
-            layout = self._layout[slot]
-            region0 = self.pool.region(slot, 0, 0, layout.region_nbytes)
-            view = layout.partials_view(
-                region0, self.tp_size, region_stride_nbytes=self.pool.region_nbytes
-            )
-            self._partials_views[slot] = view
-        return view
+        layout = self._layout[slot]
+        return self.view(
+            (slot, "partials"),
+            lambda: layout.partials_view(
+                self.pool.region(slot, 0, 0, layout.region_nbytes),
+                self.world_size,
+                region_stride_nbytes=self.pool.region_nbytes,
+            ),
+        )
 
     def done(self, slot: int) -> None:
-        """Join every side stream into the current stream and release slot ``slot`` to the
-        peers. Call after the reduce was issued on the current stream."""
+        """Complete the boundary on ``slot``: join the forked copy streams into the current
+        stream, release the slot to the peers and note a captured boundary. Call after the
+        reduce was issued on the current stream."""
         self._require_in_flight(slot, "done")
-        missing = set(self.dest_order) - self._pushed_to[slot]
+        ready = self._ready_channel(slot)
+        missing = set(self.dest_order) - {dst for dst, ch in self._pushed_to[slot] if ch == ready}
         if missing:
             raise RuntimeError(
                 f"CeReduceScatter.done(slot={slot}) before pushing to destination(s) "
                 f"{sorted(missing)}: they would wait for the ready flag forever."
             )
-        self._release(slot)
+        super().done(slot)
 
     def _release(self, slot: int) -> None:
         # IN FLIGHT -> IDLE with exactly one wait per put on every (channel, p -> d) pair, from
-        # done() and reset() alike (module docstring, "Slot state machine"):
-        #  (i)  consumed(s) from every destination this boundary did NOT push to: the wait its
-        #       un-issued push would have done, skipped on the slot's first use as push skips
-        #       it. A no-op from done(), which requires every push. Without it step (iv) would
-        #       put a second consumed flag onto one the peer never cleared, and put_signal
-        #       blocks on a set flag until the deadline (a device trap on every rank). Relies
-        #       on push() enqueuing its consumed wait only after its last host-side raise
-        #       point: `dst in _pushed_to` <=> 'its consumed wait is enqueued'.
-        #  (ii) ready(s) from every source whose push arrived but wait_all() did not wait.
-        #  (iii) join every push into the current stream.
-        #  (iv) consumed(s) to every destination: its next push on this slot waits it.
+        # done() and reset() alike (module docstring, "Slot state machine"). The base waits the
+        # owed ready flags (after a raise inside the push loop, reset() first trims them to the
+        # pushes that reached this rank) and joins the forked copy streams; around it, the
+        # consumed credits, which are the reduce-scatter's own as they live across boundaries:
+        #  (i)  BEFORE the base: consumed(s) from every destination this boundary did NOT push
+        #       to -- the wait its un-issued push would have done, skipped on the slot's first
+        #       use as push skips it. A no-op from done(), which requires every push. Without
+        #       it step (iv) would put a second consumed flag onto one the peer never cleared,
+        #       and put_signal blocks on a set flag until the deadline (a device trap on every
+        #       rank). Relies on push() enqueuing its consumed wait only after its last
+        #       host-side raise point: `(dst, ready) in _pushed_to` <=> 'its consumed wait is
+        #       enqueued'.
+        #  (iv) AFTER the base: consumed(s) to every destination: its next push on this slot
+        #       waits it.
         # Invariant afterwards, per pair: the ready flag clear with puts(ready) == waits(ready)
-        # (this boundary's put, when its push was issued, waited by wait_all() or by (ii)); the
-        # consumed flag set with puts(consumed) == uses[slot] and waits(consumed) ==
-        # uses[slot] - 1 (uses[slot] counting this completion).
+        # (this boundary's put, when its push was issued, waited by wait_all() or by the base's
+        # release); the consumed flag set with puts(consumed) == uses[slot] and
+        # waits(consumed) == uses[slot] - 1 (uses[slot] counting this completion).
+        ready, consumed = self._ready_channel(slot), self._consumed_channel(slot)
         if self._uses[slot] > 0:
             for dst in self.dest_order:
-                if dst not in self._pushed_to[slot]:
-                    self.pool.wait(dst, self._consumed_channel(slot))
-        for src in sorted(self._ready_pending[slot]):
-            self.pool.wait(src, self._ready_channel(slot))
-        self._ready_pending[slot].clear()
-        current = torch.cuda.current_stream()
-        for pushed in self._pushed[slot]:
-            current.wait_event(pushed)
+                if (dst, ready) not in self._pushed_to[slot]:
+                    self.pool.wait(dst, consumed)
+        super()._release(slot)
         for dst in self.dest_order:
-            self.pool.signal(dst, self._consumed_channel(slot))
-        self._pushed[slot] = []
-        self._pushed_to[slot] = set()
-        self._in_flight[slot] = False
+            self.pool.signal(dst, consumed)
         self._uses[slot] += 1
-
-    def drain(self) -> None:
-        """Check that no boundary is in flight; nothing is pending on the side streams after
-        :meth:`done`, so this touches no stream (safe under capture)."""
-        for slot in range(self.slots):
-            if self._in_flight[slot]:
-                raise RuntimeError(
-                    f"CeReduceScatter.drain with a boundary in flight on slot {slot}."
-                )
-
-    def reset(self) -> None:
-        """Recover from a failed boundary (the op's except path): take every slot in flight to
-        IDLE exactly as :meth:`done` would have (module docstring, "Slot state machine"), so
-        the next ``begin`` does not raise and every peer's next push and wait on the slot find
-        balanced flags. Repairs the protocol when every rank failed at the same point (a
-        rank-symmetric raise); a peer that is already trapped cannot be helped. A slot not in
-        flight (a raise before ``begin``) is left alone: its flags are already balanced.
-
-        Under rank symmetry a rank that pushed to its first ``k`` destinations received the
-        pushes of exactly ``wait_order[:k]`` (source ``s`` reaches rank ``r`` at its step
-        ``s - r - 1 mod tp``), so the pending ready set is trimmed to those before the release
-        (waiting for the others would spin to the deadline); the release then also waits the
-        ``consumed`` flags of the ``tp - 1 - k`` destinations never pushed to, which a plain
-        ``consumed`` put would otherwise double, and puts ``consumed`` to every destination.
-        The slot counts the recovery as a use: it never re-enters first-use state."""
-        for slot in range(self.slots):
-            if self._in_flight[slot]:
-                pushed = len(self._pushed_to[slot])
-                self._ready_pending[slot] &= set(self.wait_order[:pushed])
-                self._release(slot)
-        current = torch.cuda.current_stream()
-        for stream in self._streams:
-            current.wait_stream(stream)
-
-    def close(self) -> None:
-        """Release the pool (collective by symmetry: every rank must call it)."""
-        self.drain()
-        self._drop_views()
-        self._uses = [0] * self.slots
-        self._slot_nbytes = 0
-        self.pool.release()
 
 
 # =============================================================================
@@ -875,7 +771,7 @@ class CeReduceScatter:
 # =============================================================================
 
 
-class CeReduceScatterState:
+class CeReduceScatterState(CeState):
     """The copy-engine reduce-scatter state of one TP group: its own pool (separate from the
     gather's: different region size, no slot aliasing hazard), transport, slot counter, probe
     verdict.
@@ -884,13 +780,13 @@ class CeReduceScatterState:
     Wan2.2 experts, share it), released by ``TokenShardedTP.close()``; a closed state refuses
     :meth:`prepare`. :meth:`prepare` runs eagerly from ``begin()``; the first call probes the
     group's eligibility, rank-agreed, and the verdict decides :attr:`effective` for the state's
-    lifetime.
+    lifetime (:class:`CeState`: probe once, warn once, one registry per protocol).
 
     Args:
         group: The TP process group.
         group_name: ``group.group_name`` (the registry key and the op's handle).
         timeout_ms: Device-side deadline of every signal wait (:data:`DEFAULT_TIMEOUT_MS`).
-        per_peer_streams: One push side stream per destination (default) or one for all.
+        per_peer_streams: One push copy stream per destination (default) or one for all.
     """
 
     def __init__(
@@ -901,37 +797,18 @@ class CeReduceScatterState:
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         per_peer_streams: bool = True,
     ) -> None:
-        if group is None:
-            raise ValueError(
-                "CeReduceScatterState needs a torch.distributed process group; got None."
-            )
-        if timeout_ms < 0:
-            raise ValueError(f"CeReduceScatterState needs timeout_ms >= 0 (got {timeout_ms}).")
-        self.group = group
-        self.group_name = group_name
-        self.timeout_ms = timeout_ms
+        super().__init__(group, group_name, timeout_ms=timeout_ms)
         self.per_peer_streams = per_peer_streams
-        self.tp_size: int = dist.get_world_size(group)
-        self.rank: int = dist.get_rank(group)
         self.consumer_ks: set[int] = set()
         """set[int]: The noted row consumers' ``K_local`` (``in_features``)."""
         self.consumer_ns: set[int] = set()
         """set[int]: The noted row consumers' ``N`` (``out_features``), which size the pool."""
-        self.effective: bool = False
-        """bool: Whether the copy-engine reduce-scatter is in use for this group (False before
-        the probe and after a failed one; the TP then keeps the NCCL reduce-scatter)."""
-        self.reason: str = "not probed yet"
-        """str: Why the probe failed, or "" after a successful one."""
-        self.pool: SymmMemPool | None = None
-        self.transport: CeReduceScatter | None = None
-        self._probed = False
-        self._closed = False
         self._counter = 0
-        self._device = (
-            torch.device("cuda", torch.cuda.current_device())
-            if torch.cuda.is_available()
-            else torch.device("cpu")
-        )
+
+    @property
+    def tp_size(self) -> int:
+        """``world_size``, in the TP vocabulary of the adapters."""
+        return self.world_size
 
     # --- conversion time ------------------------------------------------------------------
 
@@ -961,20 +838,8 @@ class CeReduceScatterState:
         largest noted consumer ``N``, grow-only. Under CUDA-graph capture only the slot counter
         is reset; a probe or an allocation under capture raises, as does a closed state.
         """
-        if self._closed:
-            raise RuntimeError(
-                f"copy-engine reduce-scatter: the state of TP group {self.group_name!r} is closed "
-                "(TokenShardedTP.close() ran); build a new TokenShardedTP for further forwards."
-            )
-        capturing = torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
-        if not self._probed:
-            if capturing:
-                raise RuntimeError(
-                    "copy-engine reduce-scatter: the first TokenShardedTP.begin() of a group ran "
-                    "under CUDA-graph capture; run an eager warm-up forward first."
-                )
-            self._probe()
-        if not self.effective:
+        what = f"Token-sharded TP ({self.group_name}): copy-engine reduce-scatter"
+        if not self.probe_once(min_channels=2 * SLOTS, what=what):
             return
         self.begin_forward()
         if not self.consumer_ns:
@@ -982,10 +847,10 @@ class CeReduceScatterState:
         layout = Bf16RowsRegionLayout(plan.local_rows, max(self.consumer_ns))
         if self.transport.covers(layout):
             return
-        if capturing:
+        if _is_capturing():
             raise RuntimeError(
                 f"copy-engine reduce-scatter: TokenShardedTP.begin() under CUDA-graph capture "
-                f"needs a pool for {layout.slot_nbytes(self.tp_size)} bytes per slot, the pool "
+                f"needs a pool for {layout.slot_nbytes(self.world_size)} bytes per slot, the pool "
                 f"holds {self.transport.slot_nbytes}; run an eager forward of this shape first."
             )
         self.transport.reserve(layout)  # logs the size, the deadline and the triage hint
@@ -1009,69 +874,22 @@ class CeReduceScatterState:
 
     # --- probe --------------------------------------------------------------------------------
 
-    def _probe(self) -> None:
-        # Rank-agreed: >= 2 ranks, a CUDA NCCL group, a working tiny rendezvous and enough
-        # signal channels; the reason names the declining ranks. Probed once per state.
-        ok, reason = probe_symmetric_memory(self.group, self._device, min_channels=2 * SLOTS)
-        if ok:
-            self.pool = SymmMemPool(self.group, self._device, self.timeout_ms, align=DEFAULT_ALIGN)
-            self.transport = CeReduceScatter(
-                self.pool,
-                self.tp_size,
-                self.rank,
-                self._device,
-                slots=SLOTS,
-                per_peer_streams=self.per_peer_streams,
-            )
-        else:
-            logger.warning(
-                f"Token-sharded TP ({self.group_name}): copy-engine reduce-scatter unavailable "
-                f"({reason}); keeping the NCCL reduce-scatter."
-            )
-        self.effective = ok
-        self.reason = reason
-        self._probed = True
-
-    # --- teardown -----------------------------------------------------------------------------
-
-    def close(self) -> None:
-        """Release the pool and unregister (idempotent; collective by symmetry when a pool
-        exists). Call on every rank before the process group is destroyed. The state is then
-        closed: not effective, and :meth:`prepare` raises (a sibling ``TokenShardedTP`` that
-        still holds it gets a clear error rather than a silent fallback)."""
-        if self.transport is not None:
-            self.transport.close()
-        self.transport = None
-        self.pool = None
-        self.effective = False
-        self.reason = "closed"
-        self._closed = True
-        if _STATES.get(self.group_name) is self:
-            del _STATES[self.group_name]
+    def _make_transport(self) -> None:
+        self.pool = SymmMemPool(self.group, self._device, self.timeout_ms, align=DEFAULT_ALIGN)
+        self.transport = CeReduceScatter(
+            self.pool,
+            self.world_size,
+            self.rank,
+            self._device,
+            slots=SLOTS,
+            per_peer_streams=self.per_peer_streams,
+        )
 
 
-_STATES: dict[str, CeReduceScatterState] = {}
-
-
-def get_rs_state(group_name: str) -> CeReduceScatterState:
-    """The registered state of ``group_name``; raises ``KeyError`` when there is none."""
-    state = _STATES.get(group_name)
-    if state is None:
-        raise KeyError(group_name)
-    return state
-
-
-def register_rs_state(state: CeReduceScatterState) -> CeReduceScatterState:
-    """Register ``state`` for its group name, or return the one already registered for it."""
-    return _STATES.setdefault(state.group_name, state)
-
-
-def release_rs_state(group_name: str) -> None:
-    """Close and unregister the state of ``group_name`` (no-op when there is none)."""
-    state = _STATES.get(group_name)
-    if state is not None:
-        state.close()
-
+# The registry of this protocol, as TokenShardedTP and the op body call it.
+get_rs_state = CeReduceScatterState.get
+register_rs_state = CeReduceScatterState.register
+release_rs_state = CeReduceScatterState.release
 
 # =============================================================================
 # The op body
@@ -1141,16 +959,18 @@ def ce_gemm_reduce_scatter_impl(
         x_sf: Its ``(batch_size * padded_seq_len, P)`` int32 packed UE8M0 scales, any stride.
         w_fp8: The row Linear's ``[N, K_local]`` float8_e4m3fn weight.
         w_sf: Its packed int32 weight scale.
-        bias: The row Linear's ``[N]`` bf16 bias on ``tp_rank`` 0, None elsewhere and when the
-            Linear has none (added inside the reduce to source 0's partial).
+        bias: The row Linear's ``[N]`` bf16 bias, passed on every rank (each destination adds
+            it once, inside its reduce, to source 0's partial -- where the NCCL path's rank-0
+            Linear adds it); None when the Linear has none.
         group_name: The TP group's c10d name (the registry key).
         tp_rank: This rank in the group.
         tp_size: Ranks in the group.
         batch_size: ``B``.
         seq_len: ``S`` (not used by the body: the output keeps the pad rows, as the NCCL
             reduce-scatter's does; part of the plan ints the graph specializes on). A pad row of
-            the output holds the bias (rank 0's bias enters source 0's block for every row, as it
-            does on the NCCL row path); pad rows are dropped at the next gather by contract.
+            the output holds the bias (it enters source 0's block for every row, as rank 0's
+            Linear adds it on the NCCL row path); pad rows are dropped at the next gather by
+            contract.
         padded_seq_len: ``S_pad``.
     """
     del seq_len
@@ -1211,6 +1031,13 @@ def ce_gemm_reduce_scatter_impl(
         out = torch.empty((m, n), dtype=torch.bfloat16, device=x_fp8.device)
         fixed_order_reduce_bf16(transport.partials(slot), bias, out)
         transport.done(slot)
+    except CeResyncError as exc:
+        # The resync after a failed boundary found the ranks disagreeing on their boundary count
+        # (raised by ``begin`` before anything was enqueued): take the group off the copy-engine
+        # reduce-scatter for the state's lifetime (one warning) and propagate; the adapters' next
+        # call reads ``effective`` and reduce-scatters with NCCL.
+        state.disable(str(exc))
+        raise
     except Exception:
         transport.reset()
         raise
