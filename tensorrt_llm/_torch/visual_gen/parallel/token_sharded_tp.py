@@ -23,10 +23,13 @@ scales when it is an FP8 block-scale Linear on the DeepGEMM path). Only row-loca
 see all tokens, with heads sharded as in plain TP. This is not Ulysses / ring / attn2d, which
 shard the sequence through attention, and cannot be combined with them yet.
 
-Numerics: the reduce-scatter may sum the K-partials in another order and with another NCCL
-algorithm than the all-reduce. At ``tp >= 8`` on NVSwitch systems NCCL's default runs the
-all-reduce as NVLS but the reduce-scatter as a ring (bf16 rounding per hop), which is measurably
-less precise; ``NCCL_ALGO="ReduceScatter:NVLS"`` restores bitwise parity at a latency cost.
+Numerics: the NCCL reduce-scatter may sum the K-partials in another order and with another
+algorithm than the all-reduce. On NVSwitch systems NCCL's default runs the all-reduce as NVLS
+(fp32 accumulation, one rounding) but the reduce-scatter as a ring whose hops are bf16 adds
+(one rounding per hop), which is measurably less precise; ``NCCL_ALGO="ReduceScatter:NVLS"``
+restores bitwise parity at a latency cost. The copy-engine reduce-scatter mode below sums the
+same bf16 partials in fp32 in fixed source-rank order and rounds once (the NVLS class): bitwise
+with NCCL at ``tp = 2`` (one add), strictly tighter than the ring at ``tp >= 3``.
 
 A model opts in with ``_supports_token_sharded_tp = True`` and ``self._apply_tp_layout()`` at
 the end of ``__init__``, which replaces its ``self.sharder`` with a
@@ -44,6 +47,18 @@ symmetric-memory pool and runs the consumer's GEMM per source as each rank's row
 copy-engine mode is probed once, rank-agreed, at the first :meth:`TokenShardedTP.begin`; where
 it is unavailable the helper keeps the NCCL gather and warns once. Its result is bitwise the
 NCCL path's (same quantized bytes, same DeepGEMM kernel per row block, bias added once).
+
+Reduce-scatter modes (``reduce_scatter_mode``, internal; :data:`DEFAULT_REDUCE_SCATTER_MODE` is
+``"nccl"``): ``"nccl"`` runs a row projection's GEMM on all tokens and reduce-scatters the
+bf16 partial with NCCL; ``"copy_engine"`` fuses the two for an FP8 block-scale row Linear: the
+GEMM runs per destination rank, each destination's block is pushed with copy engines into its
+region of the TP group's symmetric-memory pool while the next block is multiplied, and the
+destination reduces the ``tp`` landed partials in fp32 in source-rank order
+(``token_sharded_ce_reduce_scatter``, the fused op
+``trtllm::token_sharded_fp8_ce_gemm_reduce_scatter``). It is probed once, rank-agreed, at the
+first :meth:`TokenShardedTP.begin` (its state owns a pool separate from the gather's) and falls
+back to NCCL with one warning where unavailable; the bias stays rank 0's, added to source 0's
+partial in bf16 before the fp32 chain, so the bytes NCCL would sum are the bytes it sums.
 """
 
 import math
@@ -74,13 +89,17 @@ from ..utils import SequenceSharder
 if TYPE_CHECKING:
     from ..config import DiffusionModelConfig
     from .token_sharded_ce_gather import CeGatherState
+    from .token_sharded_ce_reduce_scatter import CeReduceScatterState
 
 __all__ = [
     "DEFAULT_GATHER_MODE",
+    "DEFAULT_REDUCE_SCATTER_MODE",
     "FP8_BLOCK_SIZE",
     "GATHER_MODES",
+    "REDUCE_SCATTER_MODES",
     "Fp8BlockScaledActivation",
     "GatherMode",
+    "ReduceScatterMode",
     "TokenShardPlan",
     "TokenShardedSequenceSharder",
     "TokenShardedTP",
@@ -106,6 +125,17 @@ GATHER_MODES: tuple[GatherMode, ...] = get_args(GatherMode)
 DEFAULT_GATHER_MODE: GatherMode = "nccl"
 """The gather mode a :class:`TokenShardedTP` built without an explicit ``gather_mode`` uses
 (read at construction, so a process may flip it before the model is built)."""
+
+ReduceScatterMode = Literal["nccl", "copy_engine"]
+"""The row-projection output reduce-scatters a :class:`TokenShardedTP` can run."""
+
+REDUCE_SCATTER_MODES: tuple[ReduceScatterMode, ...] = get_args(ReduceScatterMode)
+"""The values of :data:`ReduceScatterMode`, for validation and messages."""
+
+DEFAULT_REDUCE_SCATTER_MODE: ReduceScatterMode = "nccl"
+"""The reduce-scatter mode a :class:`TokenShardedTP` built without an explicit
+``reduce_scatter_mode`` uses (read at construction, so a process may flip it before the model
+is built)."""
 
 
 class Fp8BlockScaledActivation(NamedTuple):
@@ -396,7 +426,7 @@ def drop_padding(
 
 
 # =============================================================================
-# Copy-engine gather seam
+# Copy-engine gather / reduce-scatter seams
 # =============================================================================
 
 
@@ -407,19 +437,51 @@ def _ce_gather_module() -> ModuleType:
     return token_sharded_ce_gather
 
 
+def _ce_rs_module() -> ModuleType:
+    """``token_sharded_ce_reduce_scatter``, imported on first use (it imports this module)."""
+    from . import token_sharded_ce_reduce_scatter
+
+    return token_sharded_ce_reduce_scatter
+
+
 def _registered_ce_state(mod: ModuleType, group_name: str) -> "CeGatherState | None":
-    """The registry's state for ``group_name``, or None."""
+    """The gather registry's state for ``group_name``, or None."""
     try:
         return mod.get_state(group_name)
     except KeyError:
         return None
 
 
+def _registered_rs_state(mod: ModuleType, group_name: str) -> "CeReduceScatterState | None":
+    """The reduce-scatter registry's state for ``group_name``, or None."""
+    try:
+        return mod.get_rs_state(group_name)
+    except KeyError:
+        return None
+
+
 def _ce_consumer_k(consumer: nn.Module) -> int | None:
-    """``consumer``'s ``K`` for sizing the copy-engine pool, or None when the fused op can
-    never take it (``K`` not a multiple of the FP8 block)."""
+    """``consumer``'s ``K`` (``in_features``: the gathered width of a column projection, the
+    ``K_local`` of a row projection) for sizing a copy-engine pool, or None when the fused ops
+    can never take it (``K`` not a multiple of the FP8 block)."""
     k = int(consumer.in_features)
     return k if k > 0 and k % FP8_BLOCK_SIZE == 0 else None
+
+
+def _note_row_consumer(state: "CeReduceScatterState", consumer: nn.Module) -> None:
+    """Hand a row projection's ``K_local`` to the reduce-scatter state, and its ``N`` when the
+    fused op can take it (:func:`fp8_block_scale_prequant_ok`: ``N`` sizes the state's pool
+    eagerly at ``prepare``, so a bf16 or NVFP4 row projection must not inflate it); skipped
+    when ``K_local`` is not a multiple of the FP8 block. The rule is decided when the state
+    exists -- at the first ``begin()``, after the weights are loaded, for the consumers noted
+    at conversion -- and the op's first eager call sizes the pool for any consumer missed."""
+    k = _ce_consumer_k(consumer)
+    if k is None:
+        return
+    if fp8_block_scale_prequant_ok(consumer):
+        state.note_row_consumer(k, out_features=int(consumer.out_features))
+    else:
+        state.note_row_consumer(k)
 
 
 def _check_gather_mode(gather_mode: GatherMode | None) -> GatherMode:
@@ -427,6 +489,18 @@ def _check_gather_mode(gather_mode: GatherMode | None) -> GatherMode:
     if mode not in GATHER_MODES:
         raise ValueError(
             f"TokenShardedTP: gather_mode must be one of {GATHER_MODES}; got {mode!r}."
+        )
+    return mode
+
+
+def _check_reduce_scatter_mode(
+    reduce_scatter_mode: ReduceScatterMode | None,
+) -> ReduceScatterMode:
+    mode = DEFAULT_REDUCE_SCATTER_MODE if reduce_scatter_mode is None else reduce_scatter_mode
+    if mode not in REDUCE_SCATTER_MODES:
+        raise ValueError(
+            f"TokenShardedTP: reduce_scatter_mode must be one of {REDUCE_SCATTER_MODES}; "
+            f"got {mode!r}."
         )
     return mode
 
@@ -474,6 +548,12 @@ class TokenShardedTP:
             engages only for consumers that take a pre-quantized FP8 block-scale input
             (:meth:`uses_ce_gather`); it is probed at the first :meth:`begin` and falls back
             to ``"nccl"`` with one warning where unavailable (:attr:`effective_gather_mode`).
+        reduce_scatter_mode: ``"nccl"`` or ``"copy_engine"`` (see the module docstring);
+            None selects :data:`DEFAULT_REDUCE_SCATTER_MODE` at construction. The copy-engine
+            mode engages only for FP8 block-scale row projections on a bf16 input with no
+            active LoRA (:meth:`uses_ce_reduce_scatter`); it is probed at the first
+            :meth:`begin` and falls back to ``"nccl"`` with one warning where unavailable
+            (:attr:`effective_reduce_scatter_mode`). Independent of ``gather_mode``.
     """
 
     def __init__(
@@ -483,8 +563,12 @@ class TokenShardedTP:
         tp_rank: int | None = None,
         row_align: int = 1,
         gather_mode: GatherMode | None = None,
+        reduce_scatter_mode: ReduceScatterMode | None = None,
     ) -> None:
         self.gather_mode: GatherMode = _check_gather_mode(gather_mode)
+        self.reduce_scatter_mode: ReduceScatterMode = _check_reduce_scatter_mode(
+            reduce_scatter_mode
+        )
         if group is None:
             raise ValueError(
                 "TokenShardedTP needs a torch.distributed TP process group; got None "
@@ -520,13 +604,21 @@ class TokenShardedTP:
         self._ce_state: "CeGatherState | None" = None
         self._ce_consumers: list[nn.Module] = []
         self._ce_validated: bool = False
+        # Copy-engine reduce-scatter: the same lifecycle over its own state
+        # (token_sharded_ce_reduce_scatter.CeReduceScatterState, own pool) and the row
+        # projections the adapters noted.
+        self._rs_state: "CeReduceScatterState | None" = None
+        self._rs_consumers: list[nn.Module] = []
+        self._rs_validated: bool = False
 
     @classmethod
     def from_model_config(cls, model_config: "DiffusionModelConfig") -> "TokenShardedTP":
         """The helper for the TP group of ``model_config.visual_gen_mapping``.
 
         The gather mode is ``model_config.parallel.token_sharded_gather`` when the parallel
-        config carries that attribute (and it is not None), else :data:`DEFAULT_GATHER_MODE`.
+        config carries that attribute (and it is not None), else :data:`DEFAULT_GATHER_MODE`;
+        the reduce-scatter mode likewise reads ``token_sharded_reduce_scatter``, else
+        :data:`DEFAULT_REDUCE_SCATTER_MODE`.
         """
         vgm = model_config.visual_gen_mapping
         if vgm is None:
@@ -535,7 +627,13 @@ class TokenShardedTP:
                 "(model_config.visual_gen_mapping is None)."
             )
         gather_mode = getattr(model_config.parallel, "token_sharded_gather", None)
-        return cls(vgm.tp_group_pg, tp_rank=vgm.tp_rank, gather_mode=gather_mode)
+        reduce_scatter_mode = getattr(model_config.parallel, "token_sharded_reduce_scatter", None)
+        return cls(
+            vgm.tp_group_pg,
+            tp_rank=vgm.tp_rank,
+            gather_mode=gather_mode,
+            reduce_scatter_mode=reduce_scatter_mode,
+        )
 
     # --- plan -----------------------------------------------------------------------
 
@@ -548,7 +646,8 @@ class TokenShardedTP:
         a cached shape while a peer starts a new one is not detected. In the copy-engine gather
         mode this also probes the mode once (rank-agreed), sizes the group's symmetric pool for
         the plan (grow-only; a new size under capture raises) and starts the forward's slot
-        sequence.
+        sequence; the copy-engine reduce-scatter mode does the same for its own state, after
+        the gather's.
         """
         key = (batch_size, seq_len)
         plan = self._plans.get(key)
@@ -571,6 +670,8 @@ class TokenShardedTP:
         self._plan = plan
         if self.gather_mode == "copy_engine":
             self._ce_begin(plan)
+        if self.reduce_scatter_mode == "copy_engine":
+            self._rs_begin(plan)
         return plan
 
     def _check_rank_agreement(self, batch_size: int, seq_len: int) -> None:
@@ -863,9 +964,11 @@ class TokenShardedTP:
         return payload, a.scaling_factor.reshape(-1), k
 
     def _check_fp8(
-        self, a: Fp8BlockScaledActivation, op: str = "all_gather"
+        self, a: Fp8BlockScaledActivation, op: str = "all_gather", rows: int | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        m = self.plan.local_rows
+        # ``rows``: the expected row count (this rank's ``m`` by default; the padded stream
+        # ``B * S_pad`` for a reduce-scatter input).
+        m = self.plan.local_rows if rows is None else rows
         fp8, scale = a
         if fp8.dtype != torch.float8_e4m3fn or fp8.dim() != 2 or fp8.shape[0] != m:
             raise ValueError(
@@ -964,18 +1067,23 @@ class TokenShardedTP:
         return out
 
     def close(self) -> None:
-        """Release the group's copy-engine gather state (its symmetric pool and side stream).
+        """Release the group's copy-engine gather and reduce-scatter states (their symmetric
+        pools and side streams).
 
         Call before the process group is destroyed (``BasePipeline.cleanup`` does, through the
-        model's sharder). Idempotent; a no-op in the NCCL mode. The state is shared by every
+        model's sharder). Idempotent; a no-op in the NCCL modes. Each state is shared by every
         TokenShardedTP of the group: the first close releases it for all of them.
         """
         state, self._ce_state = self._ce_state, None
-        if state is None:
-            return
-        mod = _ce_gather_module()
-        if _registered_ce_state(mod, self.group_name) is state:
-            mod.release_state(self.group_name)  # closes the state and unregisters it
+        if state is not None:
+            mod = _ce_gather_module()
+            if _registered_ce_state(mod, self.group_name) is state:
+                mod.release_state(self.group_name)  # closes the state and unregisters it
+        rs_state, self._rs_state = self._rs_state, None
+        if rs_state is not None:
+            mod = _ce_rs_module()
+            if _registered_rs_state(mod, self.group_name) is rs_state:
+                mod.release_rs_state(self.group_name)  # closes the state and unregisters it
 
     def _ensure_ce_state(self) -> "CeGatherState":
         if self._ce_state is None:
@@ -1010,6 +1118,119 @@ class TokenShardedTP:
             if fp8_block_scale_prequant_ok(consumer):
                 validate(consumer)
         self._ce_validated = True
+
+    # --- copy-engine reduce-scatter ---------------------------------------------------
+
+    def note_row_consumer(self, consumer: nn.Module) -> None:
+        """Record a row projection converted for this TP (the adapters' ``prepare()``).
+
+        In the copy-engine reduce-scatter mode its ``in_features`` (``K_local``) and, for an
+        FP8 block-scale row projection (the only kind the fused op takes), its ``out_features``
+        (``N``, which sizes the group's symmetric pool) are handed to the group's state, and
+        its FP8 operands are validated once at the first effective :meth:`begin` (the weights
+        are final only after loading, so not here). A no-op in the NCCL mode.
+        """
+        if self.reduce_scatter_mode != "copy_engine":
+            return
+        self._rs_consumers.append(consumer)
+        if self._rs_state is not None:
+            _note_row_consumer(self._rs_state, consumer)
+
+    @property
+    def effective_reduce_scatter_mode(self) -> ReduceScatterMode:
+        """``"copy_engine"`` once the probe at the first :meth:`begin` accepted it, else
+        ``"nccl"`` (the configured mode is :attr:`reduce_scatter_mode`)."""
+        state = self._rs_state
+        if self.reduce_scatter_mode == "copy_engine" and state is not None and state.effective:
+            return "copy_engine"
+        return "nccl"
+
+    def uses_ce_reduce_scatter(
+        self, consumer: nn.Module | None, act: object, lora_params: object = None
+    ) -> bool:
+        """Whether a row projection's call runs the fused copy-engine GEMM + reduce-scatter.
+
+        True iff the effective mode is ``"copy_engine"``, ``consumer`` is an FP8 block-scale
+        row Linear on the DeepGEMM path (:func:`fp8_block_scale_prequant_ok`, over its
+        ``K_local``), no LoRA is active (``lora_params`` falsy; an active LoRA needs the
+        module's own forward) and ``act`` is a bf16 tensor (the fused op quantizes it with the
+        pinned 1x128 quantizer). Anything else (NVFP4 and bf16 row consumers, pre-quantized
+        inputs) takes the module's GEMM and :meth:`reduce_scatter` as in the NCCL mode.
+        Decided per call: the quant method is final only after loading.
+        """
+        if self.effective_reduce_scatter_mode != "copy_engine" or lora_params:
+            return False
+        if not fp8_block_scale_prequant_ok(consumer):
+            return False
+        return isinstance(act, torch.Tensor) and act.dtype == torch.bfloat16
+
+    def ce_gemm_reduce_scatter(self, consumer: Linear, act: torch.Tensor) -> torch.Tensor:
+        """``consumer`` applied to all tokens and reduce-scattered to this rank's rows, fused.
+
+        ``act`` is the row projection's bf16 input for all tokens (``[B, S, K_local]`` or
+        ``[B * S, K_local]``), zero-padded per sample (:meth:`pad_row_input`) and quantized
+        here with :func:`quantize_fp8_block`; the fused op
+        ``trtllm::token_sharded_fp8_ce_gemm_reduce_scatter`` runs the GEMM per destination
+        rank, pushes each block with copy engines and reduces the landed partials in fp32 in
+        source-rank order. Returns this rank's reduced ``[m, N]`` bf16 rows (the
+        :meth:`reduce_scatter` of the padded partial, with ``consumer.bias`` applied as the
+        NCCL path applies it: once per output row, as bf16(source 0's block + bias), by every
+        destination's reduce). Call only when
+        :meth:`uses_ce_reduce_scatter`.
+        """
+        p = self.plan
+        x = quantize_fp8_block(self.pad_row_input(act))
+        fp8, scale = self._check_fp8(x, "ce_gemm_reduce_scatter", rows=p.padded_rows)
+        # Every destination adds the bias once, to source 0's block, inside its reduce: the
+        # NCCL path folds it into rank 0's partial before the collective, which reaches every
+        # destination; here the partial blocks travel unbiased, so the (replicated) bias
+        # parameter is passed on every rank, not only on tp_rank 0.
+        bias = consumer.bias
+        return torch.ops.trtllm.token_sharded_fp8_ce_gemm_reduce_scatter(
+            fp8,
+            scale,
+            consumer.weight,
+            consumer.weight_scale,
+            bias,
+            self.group_name,
+            p.tp_rank,
+            p.tp_size,
+            p.batch_size,
+            p.seq_len,
+            p.padded_seq_len,
+        )
+
+    def _ensure_rs_state(self) -> "CeReduceScatterState":
+        if self._rs_state is None:
+            mod = _ce_rs_module()
+            state = _registered_rs_state(mod, self.group_name)
+            if state is None:
+                state = mod.register_rs_state(mod.CeReduceScatterState(self.group, self.group_name))
+            for consumer in self._rs_consumers:
+                _note_row_consumer(state, consumer)
+            self._rs_state = state
+        return self._rs_state
+
+    def _rs_begin(self, plan: TokenShardPlan) -> None:
+        # As _ce_begin, over the reduce-scatter's own state and pool: eager, every rank, same
+        # order; the state probes once (rank-agreed; on failure it warns once and stays off,
+        # so the NCCL reduce-scatter is kept), starts the forward's slot sequence and sizes
+        # its pool for the plan.
+        state = self._ensure_rs_state()
+        state.prepare(plan)
+        if state.effective:
+            self._validate_rs_consumers()
+
+    def _validate_rs_consumers(self) -> None:
+        # Once, after the weights are loaded: every row consumer the fused op will run must
+        # carry the operands the per-destination GEMM expects.
+        if self._rs_validated:
+            return
+        validate = _ce_rs_module().validate_fp8_block_row_consumer
+        for consumer in self._rs_consumers:
+            if fp8_block_scale_prequant_ok(consumer):
+                validate(consumer)
+        self._rs_validated = True
 
 
 # =============================================================================
@@ -1065,12 +1286,14 @@ class TokenShardedSequenceSharder(SequenceSharder):
     @property
     def needs_eager_warmup(self) -> bool:
         """Whether the pipeline must run every warm-up shape eagerly before it captures CUDA
-        graphs: the copy-engine gather's symmetric pool is sized by the forwards, grow-only,
-        and cannot move once a graph holds its buffers."""
-        return self._tp.gather_mode == "copy_engine"
+        graphs: the copy-engine gather's and reduce-scatter's symmetric pools are sized by the
+        forwards, grow-only, and cannot move once a graph holds their buffers."""
+        return (
+            self._tp.gather_mode == "copy_engine" or self._tp.reduce_scatter_mode == "copy_engine"
+        )
 
     def close(self) -> None:
-        """Release the TP helper's copy-engine gather state (:meth:`TokenShardedTP.close`)."""
+        """Release the TP helper's copy-engine states (:meth:`TokenShardedTP.close`)."""
         self._tp.close()
 
     def gather(
