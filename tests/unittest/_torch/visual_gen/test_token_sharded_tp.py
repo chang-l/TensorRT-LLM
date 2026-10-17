@@ -414,7 +414,10 @@ def _mlp_adapter(base):
         raise _Stop
 
     module._token_sharded_tp = SimpleNamespace(
-        gather_input=gather_input, uses_ce_gather=lambda consumer, x, lora_params: False
+        gather_input=gather_input,
+        uses_ce_gather=lambda consumer, x, lora_params: False,
+        effective_reduce_scatter_mode="nccl",
+        uses_ce_reduce_scatter=lambda consumer, x, lora_params: False,
     )
     module.up_proj = object()
     return module, seen
