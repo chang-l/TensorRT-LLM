@@ -58,7 +58,11 @@ destination reduces the ``tp`` landed partials in fp32 in source-rank order
 ``trtllm::token_sharded_fp8_ce_gemm_reduce_scatter``). It is probed once, rank-agreed, at the
 first :meth:`TokenShardedTP.begin` (its state owns a pool separate from the gather's) and falls
 back to NCCL with one warning where unavailable; the bias stays rank 0's, added to source 0's
-partial in bf16 before the fp32 chain, so the bytes NCCL would sum are the bytes it sums.
+partial in bf16 before the fp32 chain, so the bytes NCCL would sum are the bytes it sums. The
+fused path is taken only where the row Linear's own GEMM is DeepGEMM: the low-M shapes main
+routes to its FP8 block-scale low-M GEMM (``1 <= M <= fp8_low_m_gemm.max_m`` bf16 rows,
+decode-sized) stay on the module's GEMM and the NCCL reduce-scatter
+(:meth:`TokenShardedTP.uses_ce_reduce_scatter`).
 """
 
 import math
@@ -1156,16 +1160,30 @@ class TokenShardedTP:
         True iff the effective mode is ``"copy_engine"``, ``consumer`` is an FP8 block-scale
         row Linear on the DeepGEMM path (:func:`fp8_block_scale_prequant_ok`, over its
         ``K_local``), no LoRA is active (``lora_params`` falsy; an active LoRA needs the
-        module's own forward) and ``act`` is a bf16 tensor (the fused op quantizes it with the
-        pinned 1x128 quantizer). Anything else (NVFP4 and bf16 row consumers, pre-quantized
-        inputs) takes the module's GEMM and :meth:`reduce_scatter` as in the NCCL mode.
-        Decided per call: the quant method is final only after loading.
+        module's own forward), ``act`` is a bf16 tensor (the fused op quantizes it with the
+        pinned 1x128 quantizer) and the module's own GEMM on its rows would be DeepGEMM: the
+        rows ``consumer.fp8_low_m_gemm`` serves (``1 <= M <= max_m`` contiguous bf16 rows,
+        decode-sized; ``Fp8BlockScaleLowMGemmRange.serves`` on the 2-D input the Linear's
+        prologue forms, as here) run its FP8 block-scale low-M GEMM, which is not bitwise with
+        the fused op's per-block DeepGEMM, so they keep the module's GEMM and
+        :meth:`reduce_scatter`. ``act`` is therefore the tensor the module's GEMM would take,
+        its row count and strides the ones the stock prologue sees: the MLP adapter passes its
+        ``down_proj`` input (the ``B * S`` real rows), the row adapter its padded input
+        (:meth:`pad_row_input`: ``B * S_pad`` rows, contiguous when the plan pads). Anything
+        else (NVFP4 and bf16 row consumers, pre-quantized inputs) takes the module's GEMM and
+        :meth:`reduce_scatter` as in the NCCL mode. Decided per call: the quant method is
+        final only after loading, the range once the weight is in the DeepGEMM layout.
         """
         if self.effective_reduce_scatter_mode != "copy_engine" or lora_params:
             return False
         if not fp8_block_scale_prequant_ok(consumer):
             return False
-        return isinstance(act, torch.Tensor) and act.dtype == torch.bfloat16
+        if not (isinstance(act, torch.Tensor) and act.dtype == torch.bfloat16):
+            return False
+        low_m = getattr(consumer, "fp8_low_m_gemm", None)
+        if low_m is None:
+            return True
+        return not low_m.serves(act.reshape(-1, act.shape[-1]) if act.dim() > 2 else act)
 
     def ce_gemm_reduce_scatter(self, consumer: Linear, act: torch.Tensor) -> torch.Tensor:
         """``consumer`` applied to all tokens and reduce-scattered to this rank's rows, fused.

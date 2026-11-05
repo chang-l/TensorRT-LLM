@@ -149,10 +149,13 @@ class TokenShardedRow(TokenShardedAdapter):
 
     def forward(self, input, *args, **kwargs):
         tp = self._token_sharded_tp
+        # Decided on the padded input, the tensor the module's own GEMM takes (its row count
+        # and strides are what the stock prologue sees; a free reshape in an unpadded plan).
         # An active LoRA (Linear.forward's lora_params) needs the module's own forward.
-        if tp.uses_ce_reduce_scatter(self, input, kwargs.get("lora_params")):
+        padded = tp.pad_row_input(input)
+        if tp.uses_ce_reduce_scatter(self, padded, kwargs.get("lora_params")):
             return tp.local_view(tp.ce_gemm_reduce_scatter(self, input))
-        partial = super().forward(tp.pad_row_input(input), *args, **kwargs)
+        partial = super().forward(padded, *args, **kwargs)
         return tp.local_view(tp.reduce_scatter(partial))
 
 
