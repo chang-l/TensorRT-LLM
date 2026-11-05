@@ -1572,7 +1572,7 @@ def _fp8_row_linear(rank, world_size, device, k_local, n, seed):
         reduce_output=True,  # built as for plain TP; the conversion turns it into a reduce-scatter
         allreduce_strategy=AllReduceStrategy.NCCL,
     ).to(device)
-    return row, {**_fp8_block_checkpoint(weight), "bias": bias}
+    return row, {**fp8_block_checkpoint(weight), "bias": bias}
 
 
 def _logic_ce_reduce_scatter_op(rank, world_size, device):
@@ -1801,9 +1801,9 @@ def _logic_adapters_ce_reduce_scatter(rank, world_size, device):
     w_row = torch.randn(k_in, n_out, dtype=torch.bfloat16) * 0.05
     w_up = torch.randn(n_out, k_in, dtype=torch.bfloat16) * 0.05
     w_down = torch.randn(k_in, n_out, dtype=torch.bfloat16) * 0.05
-    ckpt_row = {**_fp8_block_checkpoint(w_row), "bias": torch.randn(k_in) * 0.5}
-    ckpt_up = {**_fp8_block_checkpoint(w_up), "bias": torch.randn(n_out) * 0.1}
-    ckpt_down = {**_fp8_block_checkpoint(w_down), "bias": torch.randn(k_in) * 0.5}
+    ckpt_row = {**fp8_block_checkpoint(w_row), "bias": torch.randn(k_in) * 0.5}
+    ckpt_up = {**fp8_block_checkpoint(w_up), "bias": torch.randn(n_out) * 0.1}
+    ckpt_down = {**fp8_block_checkpoint(w_down), "bias": torch.randn(k_in) * 0.5}
     mapping = _mapping(rank, world_size)
     fp8bs = QuantConfig(quant_algo=QuantAlgo.FP8_BLOCK_SCALES)
 
@@ -1987,8 +1987,8 @@ def _fp8_rs_chain_parts(rank, world_size, device, d=256, n_col=128, mode="copy_e
     ).to(device)
     tp = TokenShardedTP(dist.group.WORLD, gather_mode=mode, reduce_scatter_mode=mode)
     convert_to_token_sharded_tp(_as_model(col=col, row=row), tp, exceptions={"col": "column"})
-    col.load_weights([{**_fp8_block_checkpoint(col_w), "bias": torch.zeros(n_col * world_size)}])
-    row.load_weights([{**_fp8_block_checkpoint(row_w), "bias": torch.full((d,), 0.1)}])
+    col.load_weights([{**fp8_block_checkpoint(col_w), "bias": torch.zeros(n_col * world_size)}])
+    row.load_weights([{**fp8_block_checkpoint(row_w), "bias": torch.full((d,), 0.1)}])
     col.post_load_weights()
     row.post_load_weights()
     return tp, col, row
