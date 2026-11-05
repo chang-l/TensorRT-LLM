@@ -15,7 +15,8 @@
 """CPU tests for the copy-engine reduce-scatter of token-sharded TP (no GPU, no Triton): the
 bf16 region layout against a pure-Python reference and its ``[tp, m, N]`` partials view, the
 fixed-order reduce contract through the torch-chain reference (and the wrapper's CPU fallback),
-the row-consumer check, the fused op's fake under FakeTensorMode and torch.export, the
+the row-consumer check, the adapters' route around main's FP8 block-scale low-M GEMM, the
+fused op's fake under FakeTensorMode and torch.export, the
 transport's signal protocol and its recovery bookkeeping on a fake pool and fake streams
 (every rank in one process; a scheduler that fails where the pool would trap), and the
 per-group state's probe fallback and registry lifecycle on a gloo group (spawned ranks
@@ -38,11 +39,17 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from token_sharded_tp_test_utils import simulated_helper
 
 from tensorrt_llm._torch.distributed import ce_protocol
 from tensorrt_llm._torch.distributed.symm_mem_pool import PoolLayout
-from tensorrt_llm._torch.modules.linear import Linear
+from tensorrt_llm._torch.modules.linear import (
+    Fp8BlockScaleLowMGemmRange,
+    Linear,
+    TensorParallelMode,
+)
 from tensorrt_llm._torch.visual_gen.parallel import token_sharded_ce_reduce_scatter as tsr
+from tensorrt_llm._torch.visual_gen.parallel import token_sharded_modules, token_sharded_tp
 from tensorrt_llm._torch.visual_gen.parallel.token_sharded_ce_gather import packed_weight_scale_cols
 from tensorrt_llm._torch.visual_gen.parallel.token_sharded_ce_reduce_scatter import (
     DEFAULT_ALIGN,
@@ -351,6 +358,120 @@ def test_validate_fp8_block_row_consumer():
     lin.bias = torch.nn.Parameter(torch.zeros(5121, dtype=torch.bfloat16), requires_grad=False)
     with pytest.raises(ValueError, match=r"bias must be bf16 \[5120\]"):
         validate_fp8_block_row_consumer(lin)
+
+
+# =============================================================================
+# The route around the FP8 block-scale low-M GEMM
+# =============================================================================
+
+
+def _ce_rs_helper(monkeypatch):
+    """A copy-engine reduce-scatter helper whose probe accepted the mode (no group), on a
+    simulated SM100 so that the FP8 block-scale rule holds for a CPU-built Linear."""
+    monkeypatch.setattr(token_sharded_tp, "is_sm_100f", lambda: True)
+    ts = simulated_helper(TokenShardPlan.build(2, 8, 2, 0), reduce_scatter_mode="copy_engine")
+    ts._rs_state = SimpleNamespace(effective=True, reason="")
+    return ts
+
+
+def test_low_m_gemm_rows_keep_the_module_gemm(monkeypatch):
+    """The stock Linear runs main's FP8 block-scale low-M GEMM, not DeepGEMM, on the rows its
+    ``fp8_low_m_gemm`` range serves (``1 <= M <= max_m`` contiguous bf16 rows of the 2-D input
+    its prologue forms); the fused op's per-block GEMM is DeepGEMM, so those calls keep the
+    module's GEMM and the NCCL reduce-scatter. The default range (max_m 0: an unserved shape or
+    device) and a Linear without the attribute never block."""
+    ts = _ce_rs_helper(monkeypatch)
+    lin = _fp8_block_linear()
+    assert lin.fp8_low_m_gemm == Fp8BlockScaleLowMGemmRange()  # create_weights: max_m 0
+
+    def rows(m, dtype=torch.bfloat16):
+        return torch.zeros(m, 256, dtype=dtype)
+
+    assert ts.uses_ce_reduce_scatter(lin, rows(16)) and ts.uses_ce_reduce_scatter(lin, rows(1))
+    lin.fp8_low_m_gemm = Fp8BlockScaleLowMGemmRange(max_m=256, kernel_max_m=64)
+    for m in range(1, 257):  # the whole range, both kernels of the GEMM
+        assert not ts.uses_ce_reduce_scatter(lin, rows(m)), m
+    for m in (257, 258, 512, 4096):
+        assert ts.uses_ce_reduce_scatter(lin, rows(m)), m
+    # The rows the stock prologue flattens a [B, S, K] input to, not its leading dim.
+    assert not ts.uses_ce_reduce_scatter(lin, rows(256).view(2, 128, 256))
+    assert ts.uses_ce_reduce_scatter(lin, rows(258).view(2, 129, 256))
+    # serves() wants a contiguous input (the stock Linear runs DeepGEMM otherwise).
+    assert ts.uses_ce_reduce_scatter(lin, torch.zeros(16, 512, dtype=torch.bfloat16)[:, :256])
+    # A non-bf16 input is out by the fused op's own rule (it quantizes bf16) before the range
+    # is read, in and above the range alike.
+    assert not ts.uses_ce_reduce_scatter(lin, rows(16, torch.float32))
+    assert not ts.uses_ce_reduce_scatter(lin, rows(512, torch.float32))
+    # The other rules still decide first.
+    assert not ts.uses_ce_reduce_scatter(lin, rows(512), {"adapter": 1})  # active LoRA
+    ts._rs_state = SimpleNamespace(effective=False, reason="probe failed")
+    assert not ts.uses_ce_reduce_scatter(lin, rows(512))
+    ts._rs_state = SimpleNamespace(effective=True, reason="")
+    # No attribute (a quant method without the GEMM): never blocked by it.
+    del lin.fp8_low_m_gemm
+    assert ts.uses_ce_reduce_scatter(lin, rows(16)) and ts.uses_ce_reduce_scatter(lin, rows(512))
+
+
+def test_row_adapter_decides_on_its_padded_input(monkeypatch):
+    """``TokenShardedRow`` hands the rule the tensor its GEMM takes -- the input zero-padded
+    per sample (``B * S_pad`` rows, contiguous when the plan pads) -- not the caller's tensor,
+    so the route is the stock Linear's own: a padded plan whose padding alone crosses the range
+    takes the fused op (the module's GEMM would be DeepGEMM on ``B * S_pad`` rows), and a
+    viewable non-contiguous input the range serves once padded keeps the module's GEMM."""
+    monkeypatch.setattr(token_sharded_tp, "is_sm_100f", lambda: True)
+    plan = TokenShardPlan.build(1, 5, 2, 0)  # 5 real rows, S_pad 6
+    assert plan.is_padded and plan.num_tokens == 5 and plan.padded_rows == 6
+    ts = simulated_helper(plan, reduce_scatter_mode="copy_engine")
+    ts._rs_state = SimpleNamespace(
+        effective=True, reason="", note_row_consumer=lambda k, out_features=None: None
+    )
+    calls = []
+    ts.ce_gemm_reduce_scatter = lambda consumer, act: (
+        calls.append(("ce_gemm_reduce_scatter", act))
+        or torch.zeros(plan.local_rows, 128, dtype=torch.bfloat16)
+    )
+    ts.reduce_scatter = lambda partial: (
+        calls.append(("reduce_scatter", partial))
+        or torch.zeros(plan.local_rows, 128, dtype=torch.bfloat16)
+    )
+    # The module's GEMM cannot run on CPU: a stand-in keyed on the input it gets.
+    monkeypatch.setattr(
+        Linear,
+        "forward",
+        lambda self, x, *a, **kw: (
+            calls.append(("gemm", x)) or torch.zeros(x.shape[0], 128, dtype=torch.bfloat16)
+        ),
+    )
+    lin = _fp8_block_linear()  # [128, 256]: K_local 256 at tp 2
+    lin.tp_size, lin.tp_mode = 2, TensorParallelMode.ROW
+    token_sharded_modules._convert(lin, "row", ts, "blocks.0.attn1.to_out.0")
+    x = torch.randn(1, 5, 256, dtype=torch.bfloat16)
+
+    # The range serves the caller's 5 rows but not the GEMM's 6: the fused op, on the
+    # caller's tensor (it pads itself); the rule on the caller's tensor alone would say no.
+    lin.fp8_low_m_gemm = Fp8BlockScaleLowMGemmRange(max_m=5, kernel_max_m=5)
+    assert not ts.uses_ce_reduce_scatter(lin, x)
+    out = lin(x)
+    assert [c[0] for c in calls] == ["ce_gemm_reduce_scatter"] and calls[0][1] is x
+    assert out.shape == (len(plan.entry_batch), plan.rows_per_entry, 128)
+    # The range serves the 6 padded rows: the module's GEMM on the padded (contiguous) input
+    # and the NCCL reduce-scatter, for a contiguous input and for a viewable non-contiguous one
+    # alike (the rule on the latter's own strides would say the fused op).
+    lin.fp8_low_m_gemm = Fp8BlockScaleLowMGemmRange(max_m=6, kernel_max_m=6)
+    wide = torch.randn(1, 5, 512, dtype=torch.bfloat16)[..., :256]
+    assert not wide.is_contiguous() and ts.uses_ce_reduce_scatter(lin, wide)
+    for inp in (x, wide):
+        calls.clear()
+        out = lin(inp)
+        assert [c[0] for c in calls] == ["gemm", "reduce_scatter"]
+        assert calls[0][1].shape == (6, 256) and calls[0][1].is_contiguous()
+        assert torch.equal(calls[0][1][:5], inp[0]) and not calls[0][1][5].any()
+        assert out.shape == (len(plan.entry_batch), plan.rows_per_entry, 128)
+    # Above the range on the padded rows: the fused op again.
+    lin.fp8_low_m_gemm = Fp8BlockScaleLowMGemmRange(max_m=5, kernel_max_m=5)
+    calls.clear()
+    lin(wide)
+    assert [c[0] for c in calls] == ["ce_gemm_reduce_scatter"]
 
 
 # =============================================================================

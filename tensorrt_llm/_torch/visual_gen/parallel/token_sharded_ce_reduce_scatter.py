@@ -124,7 +124,11 @@ Numerics
 --------
 The per-block GEMM is bitwise the whole-M GEMM (DeepGEMM computes each output row from its own
 activation row in one block-ordered K loop; the scales of a block are re-strided with one small
-copy, :func:`token_sharded_ce_gather.mn_major_scales`). The reduce computes, for every element,
+copy, :func:`token_sharded_ce_gather.mn_major_scales`). That holds where the row Linear's own
+GEMM is DeepGEMM, which is where the adapters take the fused op: the rows main's FP8 block-scale
+low-M GEMM serves (``1 <= M <= fp8_low_m_gemm.max_m``, decode-sized; a kernel that is not bitwise
+with DeepGEMM) stay on the module's GEMM and the NCCL reduce-scatter
+(``TokenShardedTP.uses_ce_reduce_scatter``). The reduce computes, for every element,
 ``out = bf16(((p_0' + p_1) + p_2) + ... + p_{tp-1})`` with every partial upcast to fp32, the
 adds in source-rank order ``0 .. tp - 1`` whatever arrived first, and ``p_0' = bf16(p_0 + bias)``
 when the row Linear's bias is given (passed on every rank -- each destination adds it once to source 0's

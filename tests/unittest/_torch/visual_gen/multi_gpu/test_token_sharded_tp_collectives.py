@@ -1788,8 +1788,11 @@ def _logic_adapters_ce_reduce_scatter(rank, world_size, device):
     (and the copy-engine gather: both pools alive in one group) against the NCCL adapters: the
     outputs are bitwise the fixed-order fp32 chain over the NCCL adapters' own partials (rank 0's
     with the bias) and within design 5.2's bound of the NCCL result (bitwise at tp = 2); the
-    helper's reduce_scatter is bypassed; the engagement rule holds; the torch.compile'd adapters
-    are bitwise their eager selves; close() is idempotent."""
+    helper's reduce_scatter is bypassed; on the rows the stock Linear runs main's FP8 block-scale
+    low-M GEMM (``fp8_low_m_gemm.serves``: decode-sized, not DeepGEMM) the adapters keep the
+    module's GEMM and the NCCL reduce-scatter instead, bitwise the NCCL adapters; the engagement
+    rule holds; the torch.compile'd adapters are bitwise their eager selves; close() is
+    idempotent."""
     import torch._dynamo
 
     from tensorrt_llm._torch.model_config import ModelConfig
@@ -1852,6 +1855,8 @@ def _logic_adapters_ce_reduce_scatter(rank, world_size, device):
     ).to(device)
     scattered = _spy_reduce_scatter(tp_ce)
     down_partials = []  # the NCCL MLP's down_proj output on the real rows (its RS input)
+    down_inputs = []  # and its input: the rows the stock GEMM runs on
+    mlp_ref.down_proj.register_forward_pre_hook(lambda mod, args: down_inputs.append(args[0]))
     mlp_ref.down_proj.register_forward_hook(lambda mod, args, out: down_partials.append(out))
     k_loc = n_out // world_size
 
@@ -1859,6 +1864,12 @@ def _logic_adapters_ce_reduce_scatter(rank, world_size, device):
         x = torch.randn(b, s, k_in, generator=torch.Generator().manual_seed(seed))
         x_row = torch.randn(b, s, k_loc, generator=torch.Generator().manual_seed(seed + rank))
         return x.to(device, torch.bfloat16), (2 * x_row).to(device, torch.bfloat16)
+
+    def low_m_served(linear, x):
+        """Whether the stock ``linear`` runs main's FP8 block-scale low-M GEMM on ``x``'s rows as
+        its prologue flattens them (``Fp8BlockScaleLowMGemmRange.serves`` over the weight's range
+        on this device; the rule of ``TokenShardedTP.uses_ce_reduce_scatter``)."""
+        return linear.fp8_low_m_gemm.serves(x.reshape(-1, x.shape[-1]))
 
     for b, s in _FP8_SHAPES:
         x, x_row = inputs(b, s, 100 * s + b)  # the token stream; this rank's K slice
@@ -1872,11 +1883,24 @@ def _logic_adapters_ce_reduce_scatter(rank, world_size, device):
         )
         x_loc = tp_ce.local_view(tp_ce.shard(x))
         y_ref, f_ref = row_ref(x_row), mlp_ref(x_loc)
+        # Where the stock Linear runs main's low-M GEMM (not DeepGEMM, so not bitwise with the
+        # fused op's per-block GEMM) the CE adapters keep the module's GEMM and the NCCL
+        # reduce-scatter, each deciding on the tensor its GEMM takes: the row adapter on its
+        # padded input (B * S_pad rows), the MLP adapter on its down_proj input (the B * S real
+        # rows). Rank-identical (plan ints, the weight's range on this device; 0 where the
+        # shape or device is not served: every shape is a copy-engine check then, as the shapes
+        # above 256 rows always are).
+        x_row_padded = tp_ce.pad_row_input(x_row)
+        served = {
+            "row adapter": low_m_served(row_ce, x_row_padded),
+            "MLP adapter": low_m_served(mlp_ce.down_proj, down_inputs[-1]),
+        }
         n_scattered = len(scattered)
         y_ce, f_ce = row_ce(x_row), mlp_ce(x_loc)
         _check(
-            len(scattered) == n_scattered,
-            f"the CE adapters still reduce-scattered with NCCL {(b, s)}",
+            len(scattered) - n_scattered == sum(served.values()),
+            f"the CE adapters reduce-scattered with NCCL {len(scattered) - n_scattered} times "
+            f"{(b, s)}, expected {sum(served.values())} (low-M GEMM rows: {served})",
             device,
         )
         _check(
@@ -1902,9 +1926,18 @@ def _logic_adapters_ce_reduce_scatter(rank, world_size, device):
             got2, ref2 = got.reshape(m, -1)[real], ref.reshape(m, -1)[real]
             if got2.numel() == 0:
                 # Every row of this rank is padding (e.g. (1, 5) at tp 4): nothing to compare, but
-                # _check is collective, so take part in the two checks the other ranks run.
-                _check(True, f"{what} {(b, s)}: no real rows on this rank", device)
-                _check(True, f"{what} {(b, s)}: no real rows on this rank", device)
+                # _check is collective, so take part in the checks the other ranks run.
+                for _ in range(1 if served[what] else 2):
+                    _check(True, f"{what} {(b, s)}: no real rows on this rank", device)
+                continue
+            if served[what]:
+                # The module's own GEMM and the NCCL reduce-scatter, as the NCCL adapter ran them.
+                _check(
+                    torch.equal(got2, ref2),
+                    f"{what} {(b, s)}: low-M GEMM rows != the NCCL adapter "
+                    f"({(got2 != ref2).sum().item()} of {ref2.numel()} differ)",
+                    device,
+                )
                 continue
             chain = rs.reference_fixed_order_reduce(list(parts.unbind(0)), None)[real]
             _check(
@@ -1915,8 +1948,9 @@ def _logic_adapters_ce_reduce_scatter(rank, world_size, device):
             )
             _check_rs_vs_nccl(got2, ref2, parts[:, real], device, f"{what} {(b, s)}")
         rule = (
-            tp_ce.uses_ce_reduce_scatter(row_ce, x_row)
+            tp_ce.uses_ce_reduce_scatter(row_ce, x_row_padded) is not served["row adapter"]
             and tp_ce.uses_ce_reduce_scatter(mlp_ce.down_proj, x_row)
+            is not low_m_served(mlp_ce.down_proj, x_row)
             and not tp_ce.uses_ce_reduce_scatter(row_ce, x_row, {"active": True})  # LoRA
             and not tp_ce.uses_ce_reduce_scatter(row_ce, x_row.float())  # not bf16
             and not tp_ce.uses_ce_reduce_scatter(bf16_row, x_row)  # not an FP8 block-scale row
@@ -1933,7 +1967,8 @@ def _logic_adapters_ce_reduce_scatter(rank, world_size, device):
         tp_ref.begin(b, s)
         tp_ce.begin(b, s)
         x_loc = tp_ce.local_view(tp_ce.shard(x))
-        # The row adapter is the op alone: compiled == eager bitwise.
+        # The row adapter is the op alone (the module's GEMM and the NCCL reduce-scatter on
+        # low-M GEMM rows): compiled == eager bitwise.
         _check(
             torch.equal(row_c(x_row), row_ce(x_row)),
             f"compiled CE row adapter != eager {(b, s)}",
@@ -2022,8 +2057,9 @@ def _check_rs_modes(tp, device):
 
 def _logic_compile_fullgraph_ce_rs(rank, world_size, device):
     """torch.compile(fullgraph=True) of a gather + reduce-scatter chain with both copy-engine
-    modes on: one graph (the fused ops are opaque), the column and reduce-scatter outputs
-    bitwise the eager chain's."""
+    modes on: one graph (the fused ops are opaque; on the rows the stock Linear runs main's
+    low-M GEMM the row adapter traces its module GEMM + NCCL reduce-scatter instead), the
+    column and reduce-scatter outputs bitwise the eager chain's."""
     import torch._dynamo
 
     d = 256
@@ -2073,8 +2109,10 @@ def _logic_cuda_graph_ce_rs(rank, world_size, device):
     modes on: begin() reserves both pools eagerly, two eager boundaries precede the capture (the
     consumed waits are in the graph), the replays are bitwise the eager chain on new inputs --
     which is itself bitwise the fixed-order chain over the row Linear's partials (the smaller
-    shapes run at the pool's region stride of the first, larger one) -- and a larger shape after
-    the captures is refused rather than growing a pool under the graphs."""
+    shapes run at the pool's region stride of the first, larger one), or, on the rows the stock
+    Linear runs main's low-M GEMM (``fp8_low_m_gemm.serves`` on the row adapter's padded
+    input), bitwise the module's GEMM + NCCL reduce-scatter the adapter keeps there -- and a
+    larger shape after the captures is refused rather than growing a pool under the graphs."""
     rs = _rs_module()
     d = 256
     tp, col, row = _fp8_rs_chain_parts(rank, world_size, device, d)
@@ -2105,14 +2143,27 @@ def _logic_cuda_graph_ce_rs(rank, world_size, device):
         # Eager (hence the replay) against the reference chain over the row Linear's own GEMM
         # partials on the chain's column output (rank 0's with the bias, as Linear.forward
         # places it): a reduce reading the slot at the wrong stride would still replay
-        # consistently, so eager-vs-replay alone cannot see it.
-        parts = _rs_partials(Linear.forward(row, tp.pad_row_input(ref[1])), plan, tp.group)
-        chain_ref = rs.reference_fixed_order_reduce(list(parts.unbind(0)), None)
-        _check(
-            torch.equal(ref[2].reshape(plan.local_rows, -1), chain_ref),
-            f"CE RS eager chain != the fixed-order chain over the row partials {(b, s)}",
-            device,
-        )
+        # consistently, so eager-vs-replay alone cannot see it. On the rows the stock Linear
+        # runs main's low-M GEMM the row adapter keeps the module's GEMM and the NCCL
+        # reduce-scatter (not the fixed-order chain at tp > 2), so the reference is that path
+        # on the same partials. Rank-identical; one collective _check on either branch.
+        padded = tp.pad_row_input(ref[1])
+        partial = Linear.forward(row, padded)
+        if row.fp8_low_m_gemm.serves(padded):
+            _check(
+                torch.equal(ref[2].reshape(plan.local_rows, -1), tp.reduce_scatter(partial)),
+                f"CE RS eager chain != the module's GEMM + NCCL reduce-scatter on low-M GEMM "
+                f"rows {(b, s)}",
+                device,
+            )
+        else:
+            parts = _rs_partials(partial, plan, tp.group)
+            chain_ref = rs.reference_fixed_order_reduce(list(parts.unbind(0)), None)
+            _check(
+                torch.equal(ref[2].reshape(plan.local_rows, -1), chain_ref),
+                f"CE RS eager chain != the fixed-order chain over the row partials {(b, s)}",
+                device,
+            )
         graph.replay()  # steady state of the slot protocol
         torch.cuda.synchronize()
         ok = all(torch.equal(got_t, ref_t) for got_t, ref_t in zip(static_out, ref))
