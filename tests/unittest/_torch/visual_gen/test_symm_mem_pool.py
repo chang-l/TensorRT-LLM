@@ -23,6 +23,7 @@ failure agreement are the pool's real code. What only a device can show (torch's
 rendezvous, the signal kernels, CUDA-graph capture) is not covered here.
 """
 
+import contextlib
 import inspect
 import os
 import re
@@ -312,6 +313,9 @@ class _FakeHandle:
         self.rank, self.world_size = rank, len(blocks)
         self.offset = fake.block_offset
         self.buffer_size = 1 if fake.fail == "handle" else blocks[rank].numel()
+        # P: one pad per rank as mapped into this process; only this rank's is the real one.
+        self.pads = [pad if r == rank else torch.zeros_like(pad) for r in range(len(blocks))]
+        self.signal_pad_ptrs = [p.data_ptr() for p in self.pads]
         if fake.fail == "short":  # the block holds the layout, but not behind the tensor's offset
             self.buffer_size -= fake.block_offset
 
@@ -330,10 +334,10 @@ class _FakeHandle:
         return view
 
     def get_signal_pad(self, rank, sizes, dtype):
-        assert rank == self.rank, "the pool only touches its own rank's pad"
-        if sizes[0] * dtype.itemsize > self.pad.numel():
+        pad = self.pads[rank]
+        if sizes[0] * dtype.itemsize > pad.numel():
             raise RuntimeError("injected: get_signal_pad past the end of the pad")
-        return self.pad[: sizes[0] * dtype.itemsize].view(dtype)
+        return pad[: sizes[0] * dtype.itemsize].view(dtype)
 
     def put_signal(self, dst_rank, channel=0, timeout_ms=0):
         self._fake.signals.append(("put", dst_rank, channel, timeout_ms))
@@ -366,6 +370,15 @@ class _FakeSymmMem:
         self.pad: torch.Tensor | None = None
         self._allocations: dict[int, tuple[str, torch.Tensor]] = {}
         self.allocated = 0  # blocks handed out by `empty`
+        self.memsets: list[tuple] = []
+        fake = self
+
+        class _SymmetricMemory:
+            @staticmethod
+            def memset32(input, offset, val, count=1):
+                fake.memsets.append((input.data_ptr(), input.dtype, offset, val, count))
+
+        self._SymmetricMemory = _SymmetricMemory
 
     def empty(self, nbytes, *, dtype, device):
         if self.fail == "empty":
@@ -435,12 +448,12 @@ def collectives(monkeypatch):
     return calls
 
 
-def _rank_main(rank: int, init_file: str, root: str, scenario, *args) -> None:
+def _rank_main(rank: int, world_size: int, init_file: str, root: str, scenario, *args) -> None:
     dist.init_process_group(
         "gloo",
         init_method=f"file://{init_file}",
         rank=rank,
-        world_size=2,
+        world_size=world_size,
         timeout=timedelta(seconds=60),  # a rank left alone in a collective fails, not hangs
     )
     try:
@@ -449,14 +462,14 @@ def _rank_main(rank: int, init_file: str, root: str, scenario, *args) -> None:
         dist.destroy_process_group()
 
 
-def _spawn_ranks(tmp_path, scenario, *args) -> None:
-    """Run ``scenario(rank, group, root, *args)`` on two spawned gloo ranks (they rendezvous
-    through a file, no port) and re-raise a rank's exception; bounded, so a hang fails the
-    test."""
+def _spawn_ranks(tmp_path, scenario, *args, world_size: int = 2) -> None:
+    """Run ``scenario(rank, group, root, *args)`` on ``world_size`` spawned gloo ranks (they
+    rendezvous through a file, no port) and re-raise a rank's exception; bounded, so a hang
+    fails the test."""
     ctx = mp.spawn(
         _rank_main,
-        args=(str(tmp_path / "init"), str(tmp_path), scenario, *args),
-        nprocs=2,
+        args=(world_size, str(tmp_path / "init"), str(tmp_path), scenario, *args),
+        nprocs=world_size,
         join=False,
     )
     deadline = time.monotonic() + 180
@@ -991,7 +1004,14 @@ def test_the_stand_in_follows_torchs_symmetric_memory_api():
     assert list(inspect.signature(symm_mem.rendezvous).parameters) == ["tensor", "group"]
     assert list(inspect.signature(symm_mem.get_backend).parameters) == ["device"]
     handle = torch._C._distributed_c10d._SymmetricMemory
-    for attribute in ("rank", "world_size", "offset", "buffer_size", "signal_pad_size"):
+    for attribute in (
+        "rank",
+        "world_size",
+        "offset",
+        "buffer_size",
+        "signal_pad_size",
+        "signal_pad_ptrs",
+    ):
         assert isinstance(inspect.getattr_static(handle, attribute), property), attribute
     positional = {
         "get_buffer": ["rank", "sizes", "dtype", "storage_offset"],
@@ -1003,6 +1023,8 @@ def test_the_stand_in_follows_torchs_symmetric_memory_api():
         signature = getattr(handle, method).__doc__.splitlines()[0]  # written by pybind11
         names = re.findall(r"(\w+): ", signature)
         assert names[: len(expected) + 1] == ["self", *expected], signature
+    signature = handle.memset32.__doc__.splitlines()[0]  # static: no self
+    assert re.findall(r"(\w+): ", signature)[:4] == ["input", "offset", "val", "count"], signature
 
 
 # =============================================================================
@@ -1133,6 +1155,81 @@ def test_release_after_the_group_was_destroyed_clears_without_a_collective(
     assert not pool.reserved and pool.layout is None
     assert len(fake_symm.handles) == 0 and len(fake_symm.buffers) == 0
     pool.release()
+
+
+# =============================================================================
+# Signal pad accessors and signal_write
+# =============================================================================
+
+
+def test_the_pad_accessors_follow_the_allocation(gloo_world, fake_symm):
+    pool = SymmMemPool(gloo_world, "cpu")
+    assert pool.signal_pad_ptrs == ()
+    with pytest.raises(RuntimeError, match=r"reserve\(\) first"):
+        pool.local_signal_pad()
+    assert pool.reserve(4096, slots=2, min_channels=4) is True
+    pad_ptr = fake_symm.pad.data_ptr()
+    assert pool.signal_pad_ptrs == (pad_ptr,)
+    assert f"pad={pad_ptr:#x}" in repr(pool)
+    view = pool.local_signal_pad()
+    assert view.dtype == torch.int32 and view.shape == (pool.channels * pool.world_size,)
+    assert (
+        view.data_ptr() == pad_ptr and pool.channels == 9216 // 4
+    )  # every channel is the caller's
+    assert not view.any()
+    fake_symm.pad.view(torch.int32)[5] = 1
+    assert view[5] == 1
+    pool.release()
+    assert pool.signal_pad_ptrs == () and "unreserved" in repr(pool)
+    pool.release()
+
+
+def _signal_write_at_rank_2_of_4(rank: int, group, root: str) -> None:
+    fake = _use_fake(setattr, root)
+    pool = SymmMemPool(group, "cpu")
+    assert pool.reserve(256 * 4, slots=1) is True  # the real allocation path, four ranks
+    assert pool.channels == 9216 // 16 and len(pool.signal_pad_ptrs) == 4
+    assert len(set(pool.signal_pad_ptrs)) == 4
+    view = pool.local_signal_pad()
+    assert view.dtype == torch.int32 and view.shape == (pool.channels * 4,)
+    assert view.data_ptr() == pool.signal_pad_ptrs[rank]
+    if rank == 2:
+        writes: list[tuple] = []
+        symm_mem_pool._cuda_driver = lambda: SimpleNamespace(
+            cuStreamWriteValue32=lambda stream, addr, value, flags: (
+                writes.append((stream, addr, value, flags)) or 0,
+            )
+        )
+        stream = SimpleNamespace(cuda_stream=0x1234)
+        pool.signal_write(3, 5, stream)
+        word = 4 * 5 + 2
+        assert writes == [(0x1234, pool.signal_pad_ptrs[3] + 4 * word, 1, 0)] and fake.memsets == []
+        with pytest.raises(ValueError, match="rank 4 out of range"):
+            pool.signal_write(4, 0, stream)
+        with pytest.raises(ValueError, match="channel .* out of range"):
+            pool.signal_write(0, pool.channels, stream)
+        # captured: a memset node on the forked stream
+        entered: list = []
+
+        @contextlib.contextmanager
+        def fake_stream_context(s):
+            entered.append(s)
+            yield
+
+        torch.cuda.stream = fake_stream_context
+        capturing = iter([True, True])
+        symm_mem_pool._is_capturing = lambda: next(capturing)
+        pool.signal_write(1, 7, stream)
+        assert entered == [stream]
+        assert fake.memsets == [(pool.signal_pad_ptrs[1], torch.uint32, 4 * 7 + 2, 1, 1)]
+        assert pool._peer_signal_pad(1) is pool._peer_signal_pad(1)
+        symm_mem_pool._is_capturing = lambda: False
+    pool.release()
+    assert pool.signal_pad_ptrs == ()
+
+
+def test_signal_write_and_the_pad_accessor_at_four_ranks(tmp_path):
+    _spawn_ranks(tmp_path, _signal_write_at_rank_2_of_4, world_size=4)
 
 
 if __name__ == "__main__":
